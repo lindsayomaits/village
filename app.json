@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "The Village",
+    "name": "VillageMates",
     "slug": "the-village-exchange",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -23,9 +23,9 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#FDF8F3"
       },
-      "package": "com.babysitexchange.app"
+      "package": "com.VillageMates"
     },
     "web": {
       "favicon": "./assets/favicon.png",

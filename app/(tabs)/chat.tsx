@@ -98,7 +98,7 @@ export default function ChatScreen() {
         const newId = (payload.new as Post).id;
         const { data } = await supabase
           .from('posts')
-          .select('*, family:families!family_id(*), reactions:post_reactions(*)')
+          .select('*, family:families_public!family_id(*), reactions:post_reactions(*)')
           .eq('id', newId)
           .single();
         if (data) setPosts(prev => prev.some(p => p.id === newId) ? prev : [data, ...prev]);
@@ -125,7 +125,7 @@ export default function ChatScreen() {
   async function loadPosts() {
     const { data, error } = await supabase
       .from('posts')
-      .select('*, family:families!family_id(*), reactions:post_reactions(*)')
+      .select('*, family:families_public!family_id(*), reactions:post_reactions(*)')
       .order('created_at', { ascending: false })
       .limit(100);
     if (error) {
@@ -150,7 +150,7 @@ export default function ChatScreen() {
 
   async function loadFamilies() {
     if (!family) return;
-    const { data, error } = await supabase.from('families').select('*').neq('id', family.id).order('name');
+    const { data, error } = await supabase.from('families_public').select('*').neq('id', family.id).order('name');
     if (error) {
       // eslint-disable-next-line no-console
       console.error('loadFamilies error', error);
@@ -207,7 +207,7 @@ export default function ChatScreen() {
     const { data, error } = await supabase
       .from('posts')
       .insert({ family_id: family.id, body })
-      .select('*, family:families!family_id(*), reactions:post_reactions(*)')
+      .select('*, family:families_public!family_id(*), reactions:post_reactions(*)')
       .single();
 
     if (error) {
@@ -315,6 +315,8 @@ export default function ChatScreen() {
                     key={emoji}
                     style={[styles.reactionPill, isMine && styles.reactionPillMine]}
                     onPress={() => toggleReaction(item.id, emoji)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${emoji} reaction, ${count} ${count === 1 ? 'person' : 'people'}${isMine ? ', including you' : ''}. Tap to toggle.`}
                   >
                     <Text style={styles.reactionPillText}>{emoji} {count}</Text>
                   </TouchableOpacity>
@@ -376,7 +378,7 @@ export default function ChatScreen() {
 
       <View style={styles.tabs}>
         <TouchableOpacity style={[styles.tab, tab === 'village' && styles.tabActive]} onPress={() => setTab('village')}>
-          <Text style={[styles.tabText, tab === 'village' && styles.tabTextActive]}>Village Chat</Text>
+          <Text style={[styles.tabText, tab === 'village' && styles.tabTextActive]}>VillageMates Chat</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.tab, tab === 'direct' && styles.tabActive]} onPress={() => setTab('direct')}>
           <Text style={[styles.tabText, tab === 'direct' && styles.tabTextActive]}>
@@ -390,7 +392,7 @@ export default function ChatScreen() {
           {visiblePosts.length === 0 ? (
             <View style={[styles.empty, { flex: 1 }]}>
               <Text style={styles.emptyIcon}>💬</Text>
-              <Text style={styles.emptyText}>No messages yet — say hi to the Village!</Text>
+              <Text style={styles.emptyText}>No messages yet — say hi to your VillageMates!</Text>
             </View>
           ) : (
             <FlatList
@@ -414,7 +416,7 @@ export default function ChatScreen() {
           <View style={styles.inputRow}>
             <TextInput
               style={styles.input}
-              placeholder="Message the Village..."
+              placeholder="Message your VillageMates..."
               placeholderTextColor={colors.textMuted}
               value={postBody}
               onChangeText={(text) => { setPostBody(text); setCursorPos(text.length); }}
@@ -464,6 +466,8 @@ export default function ChatScreen() {
                   key={emoji}
                   style={[styles.emojiBtn, isMine && styles.emojiBtnActive]}
                   onPress={() => { if (reactionTarget) toggleReaction(reactionTarget.id, emoji); setReactionTarget(null); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`React with ${emoji}`}
                 >
                   <Text style={styles.emojiChar}>{emoji}</Text>
                 </TouchableOpacity>

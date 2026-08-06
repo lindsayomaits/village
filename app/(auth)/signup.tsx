@@ -1,14 +1,18 @@
 import { useState } from 'react';
 import {
-  View, TextInput, TouchableOpacity, StyleSheet,
-  KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView,
+  View, TextInput, TouchableOpacity, StyleSheet, Image,
+  KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView, Linking,
 } from 'react-native';
 import { Link, useRouter } from 'expo-router';
 import { Text } from '../../components/Text';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
+import { isValidEmail } from '../../lib/utils';
 
 type Mode = 'new_household' | 'partner';
+
+const PRIVACY_POLICY_URL = 'https://drive.google.com/file/d/1sKOcD82LDafk0ShAJgCIdiSZcMb3qstl/view?usp=sharing';
+const TERMS_OF_SERVICE_URL = 'https://drive.google.com/file/d/10OrWNiS7Z76iDmRn6PSs5mmfpLHnf53v/view?usp=sharing';
 
 export default function SignupScreen() {
   const router = useRouter();
@@ -24,6 +28,8 @@ export default function SignupScreen() {
   async function handleSignup() {
     if (!agreedToTerms) return Alert.alert('Terms & Conditions', 'Please agree to the Terms & Conditions to continue.');
     if (!email || !password) return Alert.alert('Please fill in all fields');
+    if (!isValidEmail(email)) return Alert.alert('Invalid email', 'Please enter a valid email address.');
+    if (password.length < 6) return Alert.alert('Password too short', 'Password must be at least 6 characters.');
     if (mode === 'new_household' && !householdName) return Alert.alert('Please enter your household name');
     if (mode === 'partner' && !partnerCode) return Alert.alert('Please enter the partner code from your household');
     setLoading(true);
@@ -41,42 +47,48 @@ export default function SignupScreen() {
     if (authError || !authData.user) {
       return Alert.alert('Sign up failed', authError?.message ?? 'Unknown error');
     }
+    await createHousehold(authData.user.id);
+  }
 
+  async function createHousehold(userId: string) {
     const { error: householdError } = await supabase.from('families').insert({
-      user_id: authData.user.id,
+      user_id: userId,
       name: householdName.trim(),
       email: email.trim().toLowerCase(),
       hours_balance: 10,
       is_admin: false,
     });
-    if (householdError) return Alert.alert('Error creating household', householdError.message);
+    if (householdError) {
+      return Alert.alert(
+        'Almost there',
+        `Your account was created, but setting up your household didn't go through (${householdError.message}). This is usually a connection hiccup.`,
+        [
+          { text: 'Retry', onPress: () => createHousehold(userId) },
+          { text: 'Cancel', style: 'cancel' },
+        ]
+      );
+    }
 
-    Alert.alert('Welcome to The Village! 🌟', 'You start with 10 hours. Connect with households you know to get started.', [
+    Alert.alert('Welcome to VillageMates!', 'You start with 10 hours. Connect with households you know to get started.', [
       { text: "Let's go!", onPress: () => router.replace('/(tabs)/') },
     ]);
   }
 
   async function signUpAsPartner() {
-    const { data: invite, error: inviteError } = await supabase
-      .from('invites')
-      .select('*')
-      .eq('code', partnerCode.trim().toUpperCase())
-      .eq('invite_type', 'partner')
-      .is('used_by', null)
-      .single();
-    if (inviteError || !invite) {
-      return Alert.alert('Invalid partner code', 'Please check the code and try again. Make sure your partner sent you a partner invite from the app.');
-    }
-
     const { data: authData, error: authError } = await supabase.auth.signUp({ email, password });
     if (authError || !authData.user) {
       return Alert.alert('Sign up failed', authError?.message ?? 'Unknown error');
     }
 
+    // Validation happens inside join_as_partner (security definer) so it
+    // works regardless of RLS on invites, and runs after auth so the call
+    // is made as the new user rather than an anonymous session.
     const { error: joinError } = await supabase.rpc('join_as_partner', { p_code: partnerCode.trim().toUpperCase() });
-    if (joinError) return Alert.alert('Error joining household', joinError.message);
+    if (joinError) {
+      return Alert.alert('Invalid partner code', 'Please check the code and try again. Make sure your partner sent you a partner invite from the app.');
+    }
 
-    Alert.alert("You're in! 🌟", "You've been added to your partner's household account.", [
+    Alert.alert("You're in!", "You've been added to your partner's household account.", [
       { text: "Let's go!", onPress: () => router.replace('/(tabs)/') },
     ]);
   }
@@ -84,8 +96,8 @@ export default function SignupScreen() {
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <ScrollView contentContainerStyle={styles.inner} keyboardShouldPersistTaps="handled">
-        <Text style={styles.logo}>🌟</Text>
-        <Text style={styles.title}>Join The Village</Text>
+        <Image source={require('../../assets/icon.png')} style={styles.logo} />
+        <Text style={styles.title}>Join VillageMates</Text>
 
         {/* Mode toggle */}
         <View style={styles.toggle}>
@@ -147,7 +159,12 @@ export default function SignupScreen() {
             onChangeText={setPassword}
             secureTextEntry={!showPassword}
           />
-          <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
+          <TouchableOpacity
+            style={styles.eyeBtn}
+            onPress={() => setShowPassword(v => !v)}
+            accessibilityRole="button"
+            accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+          >
             <Text style={styles.eyeIcon}>{showPassword ? '🙈' : '👁️'}</Text>
           </TouchableOpacity>
         </View>
@@ -173,9 +190,9 @@ export default function SignupScreen() {
           </View>
           <Text style={styles.termsText}>
             I agree to the{' '}
-            <Text style={styles.termsLink}>Terms & Conditions</Text>
+            <Text style={styles.termsLink} onPress={() => Linking.openURL(TERMS_OF_SERVICE_URL)}>Terms & Conditions</Text>
             {' '}and{' '}
-            <Text style={styles.termsLink}>Privacy Policy</Text>
+            <Text style={styles.termsLink} onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}>Privacy Policy</Text>
           </Text>
         </TouchableOpacity>
 
@@ -200,7 +217,7 @@ export default function SignupScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   inner: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 28, paddingVertical: 40 },
-  logo: { fontSize: 56, textAlign: 'center', marginBottom: 10 },
+  logo: { width: 72, height: 72, alignSelf: 'center', marginBottom: 10, borderRadius: 16 },
   title: { fontSize: 30, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: 16 },
   toggle: {
     flexDirection: 'row', backgroundColor: colors.card,

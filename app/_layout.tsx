@@ -14,8 +14,9 @@ function RootLayoutNav() {
   useEffect(() => {
     if (loading) return;
     const inAuth = segments[0] === '(auth)';
+    const onResetPassword = (segments as string[])[1] === 'reset-password';
     if (!session && !inAuth) router.replace('/(auth)/login');
-    else if (session && inAuth) router.replace('/(tabs)/');
+    else if (session && inAuth && !onResetPassword) router.replace('/(tabs)/');
   }, [session, loading, segments]);
 
   return (

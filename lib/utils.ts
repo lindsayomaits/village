@@ -1,3 +1,7 @@
+export function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
 export function calcAge(birthday: string): number {
   const today = new Date();
   const bday = new Date(birthday + 'T00:00:00');

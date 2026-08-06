@@ -78,21 +78,28 @@ export default function AdminScreen() {
   }
 
   async function removeFamily(f: Family) {
-    Alert.alert(`Remove ${f.name}?`, 'This will remove them from the group permanently.', [
+    Alert.alert(`Remove ${f.name}?`, 'They will lose access and disappear from the directory. Their request/chat history is kept, and you can reactivate them later.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Remove', style: 'destructive', onPress: async () => {
-          await supabase.from('families').delete().eq('id', f.id);
+          const { error } = await supabase.from('families').update({ is_active: false }).eq('id', f.id);
+          if (error) return Alert.alert('Error', error.message);
           loadData();
         },
       },
     ]);
   }
 
+  async function reactivateFamily(f: Family) {
+    const { error } = await supabase.from('families').update({ is_active: true }).eq('id', f.id);
+    if (error) return Alert.alert('Error', error.message);
+    loadData();
+  }
+
   const renderFamily = ({ item }: { item: Family }) => (
     <View style={styles.card}>
       <View style={styles.cardLeft}>
-        <Text style={styles.familyName}>{item.name}</Text>
+        <Text style={styles.familyName}>{item.name}{!item.is_active ? ' (removed)' : ''}</Text>
         <Text style={styles.familyEmail}>{item.email}</Text>
       </View>
       <Text style={[
@@ -106,9 +113,15 @@ export default function AdminScreen() {
           <Text style={styles.editBtnText}>Adjust</Text>
         </TouchableOpacity>
         {!item.is_admin && (
-          <TouchableOpacity style={styles.removeBtn} onPress={() => removeFamily(item)}>
-            <Text style={styles.removeBtnText}>Remove</Text>
-          </TouchableOpacity>
+          item.is_active ? (
+            <TouchableOpacity style={styles.removeBtn} onPress={() => removeFamily(item)}>
+              <Text style={styles.removeBtnText}>Remove</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.editBtn} onPress={() => reactivateFamily(item)}>
+              <Text style={styles.editBtnText}>Reactivate</Text>
+            </TouchableOpacity>
+          )
         )}
       </View>
     </View>

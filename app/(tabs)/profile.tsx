@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import {
   View, TextInput, TouchableOpacity, StyleSheet,
-  ScrollView, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Share,
+  ScrollView, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Share, Switch,
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Text } from '../../components/Text';
@@ -15,7 +15,7 @@ import { calcAge } from '../../lib/utils';
 import type { KidEntry } from '../../types';
 
 export default function ProfileScreen() {
-  const { family, signOut, refreshFamily } = useAuth();
+  const { family, session, signOut, refreshFamily } = useAuth();
   const router = useRouter();
 
   const [name, setName] = useState('');
@@ -33,6 +33,8 @@ export default function ProfileScreen() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [generatingInvite, setGeneratingInvite] = useState(false);
+  const [togglingDiscoverable, setTogglingDiscoverable] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   useFocusEffect(useCallback(() => {
     if (family) {
@@ -68,8 +70,47 @@ export default function ProfileScreen() {
     setGeneratingInvite(false);
     if (error) return Alert.alert('Error', error.message);
     await Share.share({
-      message: `Join me on The Village babysitting app!\n\nUse this code to create your account: ${code}\n\nOn the sign-up screen, tap "Joining my partner's account" and enter this code.`,
+      message: `Join me on VillageMates, the babysitting exchange app!\n\nUse this code to create your account: ${code}\n\nOn the sign-up screen, tap "Joining my partner's account" and enter this code.`,
     });
+  }
+
+  async function handleShareConnectCode() {
+    if (!family?.connect_code) return;
+    await Share.share({
+      message: `Let's connect on VillageMates!\n\nEnter my code in the "Find People" tab to connect instantly: ${family.connect_code}`,
+    });
+  }
+
+  async function toggleDiscoverable(value: boolean) {
+    if (!family) return;
+    setTogglingDiscoverable(true);
+    const { error } = await supabase.from('families').update({ discoverable: value }).eq('id', family.id);
+    setTogglingDiscoverable(false);
+    if (error) return Alert.alert('Error', error.message);
+    await refreshFamily();
+  }
+
+  function handleDeleteAccount() {
+    const isPartner = !!family && session?.user.id === family.partner_user_id;
+    Alert.alert(
+      isPartner ? 'Leave this household?' : 'Delete your account?',
+      isPartner
+        ? "This unlinks your login from the household. The household itself, and its other parent's access, are unaffected."
+        : 'This permanently removes your personal info (name, phone, address, kids notes) and signs you out. Past chat and transaction history stays, since other households rely on it, but without your personal details attached.\n\nThis cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: isPartner ? 'Leave' : 'Delete My Account', style: 'destructive',
+          onPress: async () => {
+            setDeletingAccount(true);
+            const { error } = await supabase.rpc('delete_own_account');
+            setDeletingAccount(false);
+            if (error) return Alert.alert('Error', error.message);
+            await signOut();
+          },
+        },
+      ]
+    );
   }
 
   async function handleSave() {
@@ -308,12 +349,57 @@ export default function ProfileScreen() {
             </>
           )}
 
+          <Text style={styles.sectionHead}>Connecting</Text>
+          <Text style={styles.hint}>
+            Share your code with a household you know for an instant connection — no searching, no waiting for them to accept.
+          </Text>
+          <TouchableOpacity style={styles.connectCodeCard} onPress={handleShareConnectCode} disabled={!family?.connect_code}>
+            <View>
+              <Text style={styles.connectCodeLabel}>Your connect code</Text>
+              <Text style={styles.connectCodeValue}>{family?.connect_code ?? '——————'}</Text>
+            </View>
+            <Text style={styles.connectCodeShare}>Share</Text>
+          </TouchableOpacity>
+
+          <View style={styles.discoverableRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.discoverableLabel}>Show up in "Find People" search</Text>
+              <Text style={styles.hint}>
+                Off means people can only reach you with your connect code — you won't appear when others browse or search by name.
+              </Text>
+            </View>
+            <Switch
+              value={family?.discoverable ?? true}
+              onValueChange={toggleDiscoverable}
+              disabled={togglingDiscoverable || !family}
+              trackColor={{ false: colors.borderLight, true: colors.primary }}
+            />
+          </View>
+
           <TouchableOpacity style={styles.historyBtn} onPress={() => router.push('/history')}>
             <Text style={styles.historyBtnText}>View Hour History</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
+          <TouchableOpacity
+            style={styles.signOutBtn}
+            onPress={() => Alert.alert('Sign out?', undefined, [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Sign Out', style: 'destructive', onPress: signOut },
+            ])}
+          >
             <Text style={styles.signOutText}>Sign Out</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.deleteAccountBtn}
+            onPress={handleDeleteAccount}
+            disabled={deletingAccount}
+          >
+            {deletingAccount
+              ? <ActivityIndicator color={colors.red} />
+              : <Text style={styles.deleteAccountText}>
+                  {session?.user.id === family?.partner_user_id ? 'Leave Household' : 'Delete My Account'}
+                </Text>}
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -396,6 +482,19 @@ const styles = StyleSheet.create({
     paddingVertical: 16, alignItems: 'center', marginTop: 8,
   },
   invitePartnerText: { fontSize: 16, color: colors.primary, fontWeight: '700' },
+  connectCodeCard: {
+    backgroundColor: colors.card, borderRadius: 14, padding: 16, marginTop: 4, marginBottom: 16,
+    borderWidth: 1.5, borderColor: colors.borderLight,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
+  connectCodeLabel: { fontSize: 12, color: colors.textMuted, fontWeight: '600', marginBottom: 4 },
+  connectCodeValue: { fontSize: 22, color: colors.text, fontWeight: '800', letterSpacing: 2 },
+  connectCodeShare: { fontSize: 15, color: colors.primary, fontWeight: '700' },
+  discoverableRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 8, marginBottom: 8,
+  },
+  discoverableLabel: { fontSize: 15, color: colors.text, fontWeight: '600', marginBottom: 4 },
   historyBtn: {
     marginTop: 12, borderRadius: 16, paddingVertical: 16, alignItems: 'center',
     backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.borderLight,
@@ -406,6 +505,8 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: colors.border,
   },
   signOutText: { fontSize: 16, color: colors.textSecondary, fontWeight: '700' },
+  deleteAccountBtn: { marginTop: 20, paddingVertical: 12, alignItems: 'center' },
+  deleteAccountText: { fontSize: 14, color: colors.red, fontWeight: '600' },
   serviceRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     paddingVertical: 13, paddingHorizontal: 4,

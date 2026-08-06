@@ -89,7 +89,7 @@ export async function registerForPushNotifications(familyId: string, isPartner: 
 
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('default', {
-      name: 'The Village',
+      name: 'VillageMates',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
     });
@@ -106,15 +106,24 @@ export async function registerForPushNotifications(familyId: string, isPartner: 
   }
 }
 
-export async function notifyAllFamilies(
-  excludeFamilyId: string,
+export async function notifyConnections(
+  familyId: string,
   title: string,
   body: string,
 ) {
+  const { data: connections } = await supabase
+    .from('connections')
+    .select('requester_id, recipient_id')
+    .eq('status', 'accepted')
+    .or(`requester_id.eq.${familyId},recipient_id.eq.${familyId}`);
+
+  const connectedIds = (connections ?? []).map(c => c.requester_id === familyId ? c.recipient_id : c.requester_id);
+  if (connectedIds.length === 0) return;
+
   const { data } = await supabase
     .from('families')
     .select('push_token, partner_push_token')
-    .neq('id', excludeFamilyId);
+    .in('id', connectedIds);
 
   const tokens = (data ?? []).flatMap(f => validTokens(f.push_token, f.partner_push_token));
   await sendPush(tokens.map(to => ({ to, title, body, sound: 'default' })));
@@ -154,7 +163,7 @@ export async function notifyVillage(
     const isMentioned = mentionedFamilyIds.includes(f.id);
     if (pref === 'mentions' && !isMentioned) continue;
 
-    const title = isMentioned ? `${senderName} mentioned you` : `${senderName} in Village`;
+    const title = isMentioned ? `${senderName} mentioned you` : `${senderName} in VillageMates`;
     for (const to of validTokens(f.push_token, f.partner_push_token)) {
       messages.push({ to, title, body, sound: 'default' });
     }

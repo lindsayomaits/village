@@ -40,6 +40,8 @@ export default function MembersScreen() {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Family | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [connectCode, setConnectCode] = useState('');
+  const [connectingByCode, setConnectingByCode] = useState(false);
 
   // Gift hours state
   const [giftTarget, setGiftTarget] = useState<Family | null>(null);
@@ -48,11 +50,18 @@ export default function MembersScreen() {
   const [giftLoading, setGiftLoading] = useState(false);
 
   async function loadData() {
-    const [householdsRes, connectionsRes] = await Promise.all([
-      supabase.from('families').select('*').order('name'),
+    // families_public always lists every household (name/animal only) so
+    // browsing/discovery works network-wide; families only returns full
+    // rows (parent/phone/kids info) for self, admin, or connected
+    // households — merge, preferring the richer row where RLS allows it.
+    const [fullRes, publicRes, connectionsRes] = await Promise.all([
+      supabase.from('families').select('*'),
+      supabase.from('families_public').select('*'),
       supabase.from('connections').select('*').or(`requester_id.eq.${myHousehold?.id},recipient_id.eq.${myHousehold?.id}`),
     ]);
-    setAllHouseholds(householdsRes.data ?? []);
+    const fullById = new Map((fullRes.data ?? []).map((f: Family) => [f.id, f]));
+    const merged = (publicRes.data ?? []).map((p: Family) => fullById.get(p.id) ?? p);
+    setAllHouseholds(merged as Family[]);
     setConnections((connectionsRes.data ?? []) as Connection[]);
     setLoading(false);
   }
@@ -92,9 +101,29 @@ export default function MembersScreen() {
       status: 'pending',
     });
     setActionLoading(false);
-    if (error) return Alert.alert('Error', error.message);
+    if (error) {
+      await loadData();
+      if (error.code === '23505') {
+        return Alert.alert('Already in progress', `You and ${household.name} already have a connection or pending request.`);
+      }
+      return Alert.alert('Error', error.message);
+    }
     await loadData();
+    notifyFamily(household.id, '🤝 New connection request', `${myHousehold.name} wants to connect with you`).catch(() => {});
     Alert.alert('Request sent!', `${household.name} will be notified.`);
+  }
+
+  async function submitConnectCode() {
+    if (!connectCode.trim()) return;
+    setConnectingByCode(true);
+    const { data, error } = await supabase.rpc('connect_by_code', { p_code: connectCode.trim() });
+    setConnectingByCode(false);
+    if (error) return Alert.alert('Error', error.message);
+    setConnectCode('');
+    await loadData();
+    const name = data?.[0]?.name ?? 'Household';
+    Alert.alert('Connected! 🎉', `You're now connected with ${name}.`);
+    setTab('my_network');
   }
 
   async function acceptConnection(conn: Connection) {
@@ -103,6 +132,9 @@ export default function MembersScreen() {
     setActionLoading(false);
     await loadData();
     setSelected(null);
+    if (myHousehold) {
+      notifyFamily(conn.requester_id, '🎉 Connection accepted', `${myHousehold.name} accepted your connection request`).catch(() => {});
+    }
   }
 
   async function declineConnection(conn: Connection) {
@@ -142,8 +174,8 @@ export default function MembersScreen() {
     if (!giftTarget || !myHousehold) return;
     const currentBalance = myHousehold.hours_balance ?? 0;
     const newBalance = currentBalance - giftHours;
-    if (newBalance < -20) {
-      return Alert.alert('Not enough hours', `This gift would bring your balance to ${newBalance}h, below the -20h limit.`);
+    if (newBalance < 0) {
+      return Alert.alert('Not enough hours', `You only have ${currentBalance}h to gift.`);
     }
     Alert.alert(
       `Gift ${giftHours}h to ${giftTarget.name}?`,
@@ -182,11 +214,12 @@ export default function MembersScreen() {
     h => h.id !== myHousehold?.id && connectedIds.includes(h.id)
   );
 
-  const searchLower = search.toLowerCase();
-  const discoverHouseholds = allHouseholds.filter(h => {
+  const searchLower = search.trim().toLowerCase();
+  const discoverHouseholds = searchLower.length < 2 ? [] : allHouseholds.filter(h => {
     if (h.id === myHousehold?.id) return false;
     if (connectedIds.includes(h.id)) return false;
-    if (search && !h.name.toLowerCase().includes(searchLower)) return false;
+    if (h.discoverable === false) return false;
+    if (!h.name.toLowerCase().includes(searchLower)) return false;
     return true;
   });
 
@@ -294,16 +327,40 @@ export default function MembersScreen() {
       ) : (
         <>
           {tab === 'find_people' && (
-            <View style={styles.searchRow}>
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search by household name..."
-                placeholderTextColor={colors.textMuted}
-                value={search}
-                onChangeText={setSearch}
-                clearButtonMode="while-editing"
-              />
-            </View>
+            <>
+              <View style={styles.codeRow}>
+                <TextInput
+                  style={styles.codeInput}
+                  placeholder="Enter a connect code"
+                  placeholderTextColor={colors.textMuted}
+                  value={connectCode}
+                  onChangeText={t => setConnectCode(t.toUpperCase())}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  maxLength={6}
+                />
+                <TouchableOpacity
+                  style={[styles.codeBtn, !connectCode.trim() && styles.codeBtnDisabled]}
+                  onPress={submitConnectCode}
+                  disabled={!connectCode.trim() || connectingByCode}
+                >
+                  {connectingByCode
+                    ? <ActivityIndicator color="#fff" size="small" />
+                    : <Text style={styles.codeBtnText}>Connect</Text>}
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.orDivider}>or search by name</Text>
+              <View style={styles.searchRow}>
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Search by household name..."
+                  placeholderTextColor={colors.textMuted}
+                  value={search}
+                  onChangeText={setSearch}
+                  clearButtonMode="while-editing"
+                />
+              </View>
+            </>
           )}
 
           {tab === 'my_network' && (
@@ -328,8 +385,12 @@ export default function MembersScreen() {
             discoverHouseholds.length === 0 ? (
               <View style={styles.empty}>
                 <Text style={styles.emptyEmoji}>🔍</Text>
-                <Text style={styles.emptyTitle}>{search ? 'No results' : 'Everyone is connected'}</Text>
-                <Text style={styles.emptyText}>{search ? 'Try a different name.' : "You're connected to all households on the app."}</Text>
+                <Text style={styles.emptyTitle}>{searchLower.length >= 2 ? 'No results' : 'Know someone already?'}</Text>
+                <Text style={styles.emptyText}>
+                  {searchLower.length >= 2
+                    ? 'Try a different name.'
+                    : 'Ask for their connect code above, or type at least 2 letters of a household name to search.'}
+                </Text>
               </View>
             ) : (
               <FlatList
@@ -412,6 +473,11 @@ export default function MembersScreen() {
                     <Text style={styles.infoLabel}>{selected.kids_data?.length ? 'Notes' : 'Kids'}</Text>
                     <Text style={[styles.infoValue, { flex: 1 }]}>{renderKidsInfo(selected.kids_info)}</Text>
                   </View>
+                )}
+
+                {status !== 'connected' && selected.id !== myHousehold?.id &&
+                  !selected.parent1_name && !selected.parent2_name && !selected.kids_info && !selected.kids_data?.length && (
+                  <Text style={styles.connectHint}>Connect with this household to see contact info and kids.</Text>
                 )}
 
                 {selected.services_offered && selected.services_offered.length > 0 && (
@@ -585,6 +651,23 @@ const styles = StyleSheet.create({
     width: 7, height: 7, borderRadius: 4, backgroundColor: colors.red,
   },
 
+  codeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 20, marginTop: 8, marginBottom: 4 },
+  codeInput: {
+    flex: 1, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border,
+    borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12,
+    fontSize: 15, color: colors.text, letterSpacing: 2, fontWeight: '700',
+  },
+  codeBtn: {
+    backgroundColor: colors.primary, borderRadius: 14, paddingHorizontal: 20,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  codeBtnDisabled: { opacity: 0.5 },
+  codeBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  orDivider: {
+    textAlign: 'center', fontSize: 12, color: colors.textMuted, fontWeight: '600',
+    marginTop: 10, marginBottom: 4,
+  },
+
   searchRow: { paddingHorizontal: 20, marginBottom: 8 },
   searchInput: {
     backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border,
@@ -643,6 +726,7 @@ const styles = StyleSheet.create({
   sheetAnimal: { fontSize: 64, marginTop: 8, marginBottom: 8 },
   sheetName: { fontSize: 22, fontWeight: '800', color: colors.text, marginBottom: 20, textAlign: 'center' },
 
+  connectHint: { fontSize: 13, color: colors.textMuted, textAlign: 'center', marginBottom: 14, fontStyle: 'italic' },
   infoRow: { flexDirection: 'row', alignItems: 'flex-start', width: '100%', marginBottom: 14 },
   infoLabel: { fontSize: 12, fontWeight: '800', color: colors.sage, textTransform: 'uppercase', letterSpacing: 0.6, width: 72, paddingTop: 2 },
   infoRight: { flex: 1 },

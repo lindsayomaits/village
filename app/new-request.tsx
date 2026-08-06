@@ -10,7 +10,7 @@ import { useRouter } from 'expo-router';
 import { useAuth } from '../lib/auth';
 import { supabase } from '../lib/supabase';
 import { colors } from '../lib/theme';
-import { notifyAllFamilies, notifyFamily } from '../lib/notifications';
+import { notifyConnections, notifyFamily } from '../lib/notifications';
 import { getFamilyAnimal } from '../lib/animals';
 import type { RequestCategory, Family } from '../types';
 
@@ -335,11 +335,11 @@ export default function NewRequestScreen() {
       const rangeStr = availabilityOpenEnded
         ? `from ${dateStr} onwards`
         : `from ${dateStr} to ${toDateDisplay(availabilityEndDate)}`;
-      await notifyAllFamilies(family?.id ?? '', `${catEmoji} New availability posted`, `${family?.name} can help with ${category.replace(/_/g, ' ')} ${rangeStr} (up to ${maxHours}h)`);
+      await notifyConnections(family?.id ?? '', `${catEmoji} New availability posted`, `${family?.name} can help with ${category.replace(/_/g, ' ')} ${rangeStr} (up to ${maxHours}h)`);
     } else {
-      await notifyAllFamilies(
+      await notifyConnections(
         family?.id ?? '',
-        `${catEmoji} New request in The Village`,
+        `${catEmoji} New request in VillageMates`,
         category === 'manual_labor'  ? `${family?.name} needs help: ${laborDescription.trim()} (${duration}h · ${chargedHours}h charged)`
         : category === 'dog' && isOvernight ? `${family?.name} needs overnight pet boarding — drop-off ${toDateDisplay(dropoffDate)}, pickup ${toDateDisplay(pickupDate)}`
         : category === 'dog' && dogTask === 'house_check' ? `${family?.name} needs a house check for ${petName.trim()} on ${dateStr}`

@@ -22,7 +22,7 @@ export default function HistoryScreen() {
     if (!family) return;
     const { data } = await supabase
       .from('transactions')
-      .select('*, from_family:families!from_family_id(name), to_family:families!to_family_id(name)')
+      .select('*, from_family:families_public!from_family_id(name), to_family:families_public!to_family_id(name)')
       .or(`from_family_id.eq.${family.id},to_family_id.eq.${family.id}`)
       .order('created_at', { ascending: false })
       .limit(50);

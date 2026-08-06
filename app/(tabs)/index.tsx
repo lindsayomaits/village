@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import {
-  View, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, ActivityIndicator,
+  View, StyleSheet, ScrollView, TouchableOpacity, Image,
+  RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -11,43 +11,26 @@ import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
-import type { Family, Request } from '../../types';
+import type { Request } from '../../types';
 
 export default function HomeScreen() {
   const { family, signOut, refreshFamily } = useAuth();
   const router = useRouter();
-  const [families, setFamilies] = useState<Family[]>([]);
   const [myItems, setMyItems] = useState<Request[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   async function loadData() {
     const today = new Date().toISOString().split('T')[0];
-    const [{ data: conns }, { data: reqs }] = await Promise.all([
-      family
-        ? supabase.from('connections').select('requester_id, recipient_id').eq('status', 'accepted')
-            .or(`requester_id.eq.${family.id},recipient_id.eq.${family.id}`)
-        : Promise.resolve({ data: [] }),
-      family
-        ? supabase
-            .from('requests')
-            .select('*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*)')
-            .or(`requesting_family_id.eq.${family.id},fulfilling_family_id.eq.${family.id}`)
-            .in('status', ['open', 'accepted'])
-            .gte('date', today)
-            .order('date', { ascending: true })
-        : Promise.resolve({ data: [] }),
-    ]);
-    const connectedIds = ((conns ?? []) as { requester_id: string; recipient_id: string }[]).map(c =>
-      c.requester_id === family?.id ? c.recipient_id : c.requester_id
-    );
-    const networkIds = [...connectedIds, family?.id ?? ''].filter(Boolean);
-    if (networkIds.length > 0) {
-      const { data: fams } = await supabase.from('families').select('*').in('id', networkIds).order('hours_balance', { ascending: false });
-      setFamilies(fams ?? []);
-    } else {
-      setFamilies(family ? [family] : []);
-    }
+    const { data: reqs } = family
+      ? await supabase
+          .from('requests')
+          .select('*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*)')
+          .or(`requesting_family_id.eq.${family.id},fulfilling_family_id.eq.${family.id}`)
+          .in('status', ['open', 'accepted'])
+          .gte('date', today)
+          .order('date', { ascending: true })
+      : { data: [] };
     setMyItems(reqs ?? []);
     setLoading(false);
   }
@@ -68,7 +51,7 @@ export default function HomeScreen() {
   const myRequests = myItems.filter(r => r.requesting_family_id === family?.id);
   const mySits = myItems.filter(r => r.fulfilling_family_id === family?.id);
 
-  const isNewUser = !family?.parent1_name && !family?.parent2_name;
+  const isNewUser = !family?.parent1_name || !family?.parent1_phone;
 
   function formatDate(dateStr: string) {
     const d = new Date(dateStr + 'T00:00:00');
@@ -87,13 +70,22 @@ export default function HomeScreen() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <View>
-            <Text style={styles.greeting}>
-              Hi, {family?.name ?? 'there'} {getFamilyAnimal(family?.id ?? '', family?.animal ?? null)}
-            </Text>
-            <Text style={styles.subGreeting}>The Village</Text>
+          <View style={styles.headerBrandRow}>
+            <Image source={require('../../assets/icon.png')} style={styles.headerLogo} />
+            <View>
+              <Text style={styles.greeting}>
+                Hi, {family?.name ?? 'there'} {getFamilyAnimal(family?.id ?? '', family?.animal ?? null)}
+              </Text>
+              <Text style={styles.subGreeting}>VillageMates</Text>
+            </View>
           </View>
-          <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
+          <TouchableOpacity
+            style={styles.signOutBtn}
+            onPress={() => Alert.alert('Sign out?', undefined, [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Sign Out', style: 'destructive', onPress: signOut },
+            ])}
+          >
             <Text style={styles.signOutText}>Sign out</Text>
           </TouchableOpacity>
         </View>
@@ -101,8 +93,8 @@ export default function HomeScreen() {
         {/* Onboarding banner — only for new users */}
         {isNewUser && (
           <View style={styles.onboardingCard}>
-            <Text style={styles.onboardingEmoji}>🌟</Text>
-            <Text style={styles.onboardingTitle}>Welcome to The Village!</Text>
+            <Image source={require('../../assets/icon.png')} style={styles.onboardingLogo} />
+            <Text style={styles.onboardingTitle}>Welcome to VillageMates!</Text>
             <Text style={styles.onboardingBody}>
               You start with 10 hours. Add your name, phone, and kids so other households know who you are.
             </Text>
@@ -193,7 +185,7 @@ export default function HomeScreen() {
             {/* My open & accepted posts (I'm the requester or offerer) */}
             {myRequests.length > 0 && (
               <>
-                <Text style={styles.sectionTitle}>Your Posts</Text>
+                <Text style={styles.sectionTitle}>My Posts</Text>
                 {myRequests.map(r => {
                   const isOffer = r.post_type === 'offering';
                   return (
@@ -208,7 +200,7 @@ export default function HomeScreen() {
                     >
                       <View style={styles.itemCardLeft}>
                         <View style={[styles.postTypePill, { backgroundColor: isOffer ? colors.sage : colors.primary }]}>
-                          <Text style={styles.postTypePillText}>{isOffer ? 'Can help' : 'Needs help'}</Text>
+                          <Text style={styles.postTypePillText}>{isOffer ? 'I can help' : 'I need help'}</Text>
                         </View>
                         <View style={styles.itemInfo}>
                           <Text style={styles.itemTitle}>{r.title}</Text>
@@ -230,24 +222,6 @@ export default function HomeScreen() {
                 })}
               </>
             )}
-
-            {/* Group standings */}
-            <Text style={styles.sectionTitle}>Group Standings</Text>
-            {families.map((f, i) => (
-              <View key={f.id} style={[styles.familyRow, f.id === family?.id && styles.familyRowSelf]}>
-                <Text style={styles.familyRank}>{i + 1}</Text>
-                <Text style={styles.familyAnimal}>{getFamilyAnimal(f.id, f.animal)}</Text>
-                <Text style={styles.familyName}>
-                  {f.name}{f.id === family?.id ? ' (you)' : ''}
-                </Text>
-                <Text style={[
-                  styles.familyBalance,
-                  { color: f.hours_balance < 0 ? colors.red : f.hours_balance <= 3 ? colors.amber : colors.sage }
-                ]}>
-                  {f.hours_balance > 0 ? '+' : ''}{f.hours_balance}h
-                </Text>
-              </View>
-            ))}
           </>
         )}
       </ScrollView>
@@ -260,6 +234,8 @@ const styles = StyleSheet.create({
   scroll: { paddingHorizontal: 20, paddingBottom: 32 },
 
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 16, marginBottom: 20 },
+  headerBrandRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerLogo: { width: 38, height: 38, borderRadius: 9 },
   greeting: { fontSize: 22, fontWeight: '800', color: colors.text },
   subGreeting: { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
   signOutBtn: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.card },
@@ -270,7 +246,7 @@ const styles = StyleSheet.create({
     marginBottom: 16, borderWidth: 1.5, borderColor: colors.primary + '40',
     alignItems: 'center',
   },
-  onboardingEmoji: { fontSize: 36, marginBottom: 8 },
+  onboardingLogo: { width: 44, height: 44, marginBottom: 8, borderRadius: 10 },
   onboardingTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: 6, textAlign: 'center' },
   onboardingBody: { fontSize: 14, color: colors.textSecondary, textAlign: 'center', lineHeight: 20, marginBottom: 16 },
   onboardingBtn: {
@@ -332,15 +308,4 @@ const styles = StyleSheet.create({
   },
   earnBadgeText: { color: '#fff', fontWeight: '800', fontSize: 14 },
   chevron: { fontSize: 22, color: colors.textMuted, marginLeft: 8 },
-
-  familyRow: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card,
-    borderRadius: 14, padding: 14, marginBottom: 8,
-    borderWidth: 1.5, borderColor: colors.borderLight,
-  },
-  familyRowSelf: { borderColor: colors.sage },
-  familyRank: { fontSize: 13, color: colors.textMuted, width: 24, fontWeight: '600' },
-  familyAnimal: { fontSize: 20, marginRight: 8 },
-  familyName: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.text },
-  familyBalance: { fontSize: 16, fontWeight: '800' },
 });

@@ -9,6 +9,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
+import { notifyFamily } from '../../lib/notifications';
 import type { DirectMessage } from '../../types';
 
 export default function DMScreen() {
@@ -76,6 +77,7 @@ export default function DMScreen() {
       .single();
     if (data) setMessages(prev => [data, ...prev]);
     setSending(false);
+    notifyFamily(otherId, `💬 ${family.name}`, msgBody).catch(() => {});
   }
 
   function formatTime(iso: string) {

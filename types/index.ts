@@ -12,6 +12,9 @@ export type Family = {
   email: string;
   hours_balance: number;
   is_admin: boolean;
+  is_active: boolean;
+  connect_code: string | null;
+  discoverable: boolean;
   push_token: string | null;
   partner_push_token: string | null;
   phone: string | null;

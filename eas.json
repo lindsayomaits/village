@@ -9,11 +9,7 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal",
-      "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "https://jiuungeisnvyozwkaqde.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImppdXVuZ2Vpc252eW96d2thcWRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NjA1NjgsImV4cCI6MjA5NDMzNjU2OH0.Z6tfrtY1me-3klaKDTU3Dpilez0u7F3B0sEKpqqCF6g"
-      }
+      "distribution": "internal"
     },
     "production": {
       "autoIncrement": true

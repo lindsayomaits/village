@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import {
-  View, TextInput, TouchableOpacity, StyleSheet,
+  View, TextInput, TouchableOpacity, StyleSheet, Image,
   KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import { Link, useRouter } from 'expo-router';
 import { Text } from '../../components/Text';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
+import { isValidEmail } from '../../lib/utils';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -17,6 +18,7 @@ export default function LoginScreen() {
 
   async function handleLogin() {
     if (!email || !password) return Alert.alert('Please fill in all fields');
+    if (!isValidEmail(email)) return Alert.alert('Invalid email', 'Please enter a valid email address.');
     setLoading(true);
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
@@ -27,8 +29,8 @@ export default function LoginScreen() {
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.inner}>
-        <Text style={styles.logo}>🌟</Text>
-        <Text style={styles.title}>The Village</Text>
+        <Image source={require('../../assets/icon.png')} style={styles.logo} />
+        <Text style={styles.title}>VillageMates</Text>
         <Text style={styles.subtitle}>Log in to your account</Text>
 
         <TextInput
@@ -50,7 +52,12 @@ export default function LoginScreen() {
             onChangeText={setPassword}
             secureTextEntry={!showPassword}
           />
-          <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(v => !v)}>
+          <TouchableOpacity
+            style={styles.eyeBtn}
+            onPress={() => setShowPassword(v => !v)}
+            accessibilityRole="button"
+            accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+          >
             <Text style={styles.eyeIcon}>{showPassword ? '🙈' : '👁️'}</Text>
           </TouchableOpacity>
         </View>
@@ -78,7 +85,7 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   inner: { flex: 1, justifyContent: 'center', paddingHorizontal: 28 },
-  logo: { fontSize: 56, textAlign: 'center', marginBottom: 10 },
+  logo: { width: 72, height: 72, alignSelf: 'center', marginBottom: 10, borderRadius: 16 },
   title: { fontSize: 32, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: 6 },
   subtitle: { fontSize: 15, color: colors.textSecondary, textAlign: 'center', marginBottom: 36, fontWeight: '500' },
   input: {

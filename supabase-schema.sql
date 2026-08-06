@@ -668,6 +668,470 @@ end;
 $$;
 
 -- ============================================================
+-- MIGRATION: Network privacy — gate profile PII by connection
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 20. Public-safe view for browsing (name/animal only — no PII).
+--     Used everywhere the app needs to list/identify households across
+--     the whole network regardless of connection status (village chat,
+--     @mentions, transaction history, "Find People" discovery tab).
+create or replace view families_public as
+  select id, name, animal, services_offered, hours_balance, is_admin, created_at
+  from families;
+grant select on families_public to authenticated;
+
+-- 21. Restrict full family row (parent names/phone, kids info, address,
+--     emergency contact, etc.) to: self, partner, admin, or a connected
+--     household. Previously any authenticated user could read every
+--     household's PII directly regardless of connection status.
+drop policy if exists "families_select" on families;
+create policy "families_select" on families for select to authenticated using (
+  user_id = auth.uid()
+  or partner_user_id = auth.uid()
+  or is_admin()
+  or are_connected(id, current_family_id())
+);
+
+-- 22. Invite codes should only be visible to the household that created
+--     them (or admins) — previously any authenticated user could read
+--     every partner invite code and join_as_partner() onto someone
+--     else's household.
+drop policy if exists "invites_select" on invites;
+create policy "invites_select" on invites for select to authenticated using (
+  created_by = current_family_id() or family_id = current_family_id() or is_admin()
+);
+
+-- 23. Prevent duplicate connection rows in either direction (A→B and
+--     B→A both pending at once, which desynced the two sides' UI).
+create unique index if not exists idx_connections_unique_pair
+  on connections (least(requester_id, recipient_id), greatest(requester_id, recipient_id));
+
+-- ============================================================
+-- MIGRATION: Reconcile schema file with columns already live in
+-- production (found via code that reads/writes them but had no
+-- corresponding migration in this file). All idempotent — safe to run
+-- whether or not the columns already exist.
+-- ============================================================
+
+-- 24. Profile fields used by profile.tsx / members.tsx / requests.tsx
+alter table families add column if not exists phone text;
+alter table families add column if not exists kids_info text;
+alter table families add column if not exists animal text;
+alter table families add column if not exists partner_push_token text;
+alter table families add column if not exists parent1_name text;
+alter table families add column if not exists parent1_phone text;
+alter table families add column if not exists parent2_name text;
+alter table families add column if not exists parent2_phone text;
+alter table families add column if not exists address text;
+alter table families add column if not exists emergency_contact text;
+
+-- ============================================================
+-- MIGRATION: cancel_accepted_request — close an authorization gap
+--
+-- This function already existed live (confirmed via pg_get_functiondef)
+-- and its behavior is correct — this is NOT a rewrite. The only change:
+-- the live version checked that p_family_id matched the request's
+-- requester/fulfiller, but never checked that p_family_id was actually
+-- the CALLER. Anyone could read a request's ids off the app and pass
+-- either one as p_family_id to cancel/reverse a booking they're not
+-- part of. Added a caller-identity check; note text, null-ing behavior,
+-- and everything else preserved exactly as it was live.
+-- ============================================================
+
+-- 25. Cancel an accepted booking. Either the requester or the fulfiller
+--     may call it. Requester cancelling closes the request entirely and
+--     refunds the requester. Fulfiller backing out reopens the post for
+--     someone else to pick up and still refunds the requester.
+create or replace function cancel_accepted_request(p_request_id uuid, p_family_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request requests%rowtype;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+
+  if not found then
+    raise exception 'Request not found';
+  end if;
+
+  if v_request.status <> 'accepted' then
+    raise exception 'Request is not in accepted status';
+  end if;
+
+  if v_request.requesting_family_id <> p_family_id
+     and v_request.fulfilling_family_id <> p_family_id then
+    raise exception 'Not authorized to cancel this request';
+  end if;
+
+  -- NEW: p_family_id must actually be the caller (or an admin) —
+  -- previously unchecked, allowing impersonation of either party.
+  if not (p_family_id = current_family_id() or is_admin()) then
+    raise exception 'Not authorized to cancel this request';
+  end if;
+
+  -- Return hours to requester, take back from fulfiller
+  update families set hours_balance = hours_balance + v_request.duration_hours
+    where id = v_request.requesting_family_id;
+  update families set hours_balance = hours_balance - v_request.duration_hours
+    where id = v_request.fulfilling_family_id;
+
+  -- Record the reversal
+  insert into transactions (from_family_id, to_family_id, hours, request_id, note)
+    values (
+      v_request.fulfilling_family_id,
+      v_request.requesting_family_id,
+      v_request.duration_hours,
+      p_request_id,
+      'Sit cancelled — hours returned'
+    );
+
+  -- Requester cancels → cancelled. Fulfiller backs out → reopen.
+  if v_request.requesting_family_id = p_family_id then
+    update requests set status = 'cancelled', fulfilling_family_id = null where id = p_request_id;
+  else
+    update requests set status = 'open', fulfilling_family_id = null where id = p_request_id;
+  end if;
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: Soft-delete households (admin "Remove")
+-- Previously the admin panel hard-deleted a family row, which cascaded
+-- to permanently delete all of that household's requests and chat
+-- posts (families.id references cascade on those tables). Switching to
+-- a deactivation flag preserves history/ledger integrity.
+-- ============================================================
+
+-- 26. Add is_active flag; existing rows default to active
+alter table families add column if not exists is_active boolean not null default true;
+
+-- 27. Public directory view excludes deactivated households
+create or replace view families_public as
+  select id, name, animal, services_offered, hours_balance, is_admin, created_at
+  from families
+  where is_active;
+grant select on families_public to authenticated;
+
+-- ============================================================
+-- MIGRATION: Deactivation actually locks the account out
+--
+-- Until now, is_active only hid a household from the public directory.
+-- Everything else — reading full profiles you're connected to, posting
+-- in chat, creating requests, gifting hours, all the RPCs — still
+-- worked for a deactivated household because none of those checks
+-- looked at is_active. This closes that: current_family_id() and
+-- is_admin() now return nothing for a deactivated account, which
+-- cascades through every policy/function that relies on them (nearly
+-- all of them). Also blocks a deactivated user from flipping their own
+-- is_active back on, and stops other people from still seeing/gifting/
+-- messaging a deactivated household even if they were connected.
+-- ============================================================
+
+-- 28. current_family_id() / is_admin() ignore deactivated accounts
+create or replace function current_family_id()
+returns uuid language sql stable security definer as $$
+  select coalesce(
+    (select id from families where user_id = auth.uid() and is_active limit 1),
+    (select id from families where partner_user_id = auth.uid() and is_active limit 1)
+  );
+$$;
+
+create or replace function is_admin()
+returns boolean language sql stable security definer as $$
+  select coalesce((
+    select is_admin from families
+    where (user_id = auth.uid() or partner_user_id = auth.uid()) and is_active
+    limit 1
+  ), false);
+$$;
+
+-- 29. A deactivated user can still read their OWN row (so the app can
+--     show "you've been removed") but can no longer update it — closes
+--     the hole where they could just set is_active back to true
+--     themselves. Also: other people can no longer see a deactivated
+--     household's full profile even via an existing connection.
+drop policy if exists "families_update" on families;
+create policy "families_update" on families for update to authenticated
+  using ((user_id = auth.uid() or partner_user_id = auth.uid()) and is_active or is_admin());
+
+drop policy if exists "families_select" on families;
+create policy "families_select" on families for select to authenticated using (
+  user_id = auth.uid()
+  or partner_user_id = auth.uid()
+  or is_admin()
+  or (is_active and are_connected(id, current_family_id()))
+);
+
+-- 30. Village chat / reactions were readable by anyone authenticated —
+--     now requires an active account (or admin).
+drop policy if exists "posts_select" on posts;
+create policy "posts_select" on posts for select to authenticated
+  using (current_family_id() is not null or is_admin());
+
+drop policy if exists "reactions_select" on post_reactions;
+create policy "reactions_select" on post_reactions for select to authenticated
+  using (current_family_id() is not null or is_admin());
+
+-- 31. families_public directory itself now also requires an active caller
+create or replace view families_public as
+  select id, name, animal, services_offered, hours_balance, is_admin, created_at
+  from families
+  where is_active and (current_family_id() is not null or is_admin());
+grant select on families_public to authenticated;
+
+-- 32. gift_hours: can only gift what you actually have (no dipping into
+--     the -20h line of credit like accepted/offered work can), must go
+--     to a real, active, connected household, not just any id.
+create or replace function gift_hours(
+  p_recipient_id uuid,
+  p_hours        numeric,
+  p_note         text default null
+)
+returns void language plpgsql security definer as $$
+declare
+  v_gifter_id         uuid;
+  v_new_bal           numeric;
+  v_recipient_active  boolean;
+begin
+  v_gifter_id := current_family_id();
+  if v_gifter_id is null then raise exception 'Not authenticated'; end if;
+  if p_recipient_id = v_gifter_id then raise exception 'Cannot gift hours to yourself'; end if;
+  if p_hours <= 0 or p_hours > 100 then raise exception 'Hours must be between 0.5 and 100'; end if;
+
+  select is_active into v_recipient_active from families where id = p_recipient_id;
+  if not found or not v_recipient_active then
+    raise exception 'Recipient household not found';
+  end if;
+
+  if not (is_admin() or are_connected(p_recipient_id, v_gifter_id)) then
+    raise exception 'You can only gift hours to a connected household';
+  end if;
+
+  select hours_balance - p_hours into v_new_bal
+    from families where id = v_gifter_id for update;
+  if v_new_bal < 0 then
+    raise exception 'You can only gift hours you actually have';
+  end if;
+
+  update families set hours_balance = hours_balance - p_hours where id = v_gifter_id;
+  update families set hours_balance = hours_balance + p_hours where id = p_recipient_id;
+
+  insert into transactions (from_family_id, to_family_id, hours, note)
+    values (v_gifter_id, p_recipient_id, p_hours, coalesce(nullif(trim(p_note), ''), 'Gift of hours'));
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: Errands category (app already builds this form, DB
+-- constraint never caught up — submitting one threw a raw DB error)
+-- Run in Supabase SQL editor
+-- ============================================================
+alter table requests drop constraint if exists requests_category_check;
+alter table requests add constraint requests_category_check
+  check (category in ('kid_sit', 'dog', 'manual_labor', 'professional', 'cooking', 'elder_care', 'physical_training', 'errands'));
+
+-- ============================================================
+-- MIGRATION: Connect codes + discoverability
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 33. Stable per-household connect code (share in person / via text to
+--     instantly connect, no browsing required) and a directory opt-out.
+alter table families add column if not exists connect_code text unique;
+alter table families add column if not exists discoverable boolean not null default true;
+
+update families set connect_code = upper(substr(md5(random()::text || id::text), 1, 6))
+  where connect_code is null;
+
+create or replace function set_connect_code()
+returns trigger language plpgsql as $$
+begin
+  if new.connect_code is null then
+    new.connect_code := upper(substr(md5(random()::text || new.id::text), 1, 6));
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_set_connect_code on families;
+create trigger trg_set_connect_code before insert on families
+  for each row execute function set_connect_code();
+
+-- 34. families_public gains discoverable so "Find People" can hide
+--     opted-out households from search/browse without affecting their
+--     visibility in "My Network" (that list comes from an existing
+--     connection, not this view's filter).
+create or replace view families_public as
+  select id, name, animal, services_offered, hours_balance, is_admin, created_at, discoverable
+  from families
+  where is_active and (current_family_id() is not null or is_admin());
+grant select on families_public to authenticated;
+
+-- 35. connect_by_code: look up a household by its code and instantly
+--     create an accepted connection. Security definer because the
+--     caller has no select access to another household's row until
+--     connected — this is the one sanctioned way to bypass that, gated
+--     on knowing the exact code (shared in person / by text), not on
+--     browsing.
+create or replace function connect_by_code(p_code text)
+returns table(id uuid, name text, animal text) language plpgsql security definer as $$
+declare
+  v_me     uuid;
+  v_target families%rowtype;
+begin
+  v_me := current_family_id();
+  if v_me is null then raise exception 'Not authenticated'; end if;
+
+  select * into v_target from families
+    where connect_code = upper(trim(p_code)) and is_active;
+  if not found then raise exception 'Invalid code'; end if;
+  if v_target.id = v_me then raise exception 'That is your own code'; end if;
+
+  if exists (
+    select 1 from connections
+    where (requester_id = v_me and recipient_id = v_target.id)
+       or (requester_id = v_target.id and recipient_id = v_me)
+  ) then
+    update connections set status = 'accepted'
+      where (requester_id = v_me and recipient_id = v_target.id)
+         or (requester_id = v_target.id and recipient_id = v_me);
+  else
+    insert into connections (requester_id, recipient_id, status)
+      values (v_me, v_target.id, 'accepted');
+  end if;
+
+  return query select v_target.id, v_target.name, v_target.animal;
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: Rate-limit connect_by_code
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 37. Cap connect-code guesses per household to slow down brute-forcing
+--     the 6-char code space. Logs every attempt (success or not); a
+--     household gets locked out for the rest of the window once it hits
+--     the cap, not just once it starts failing, so legitimate rapid
+--     retries don't extend the runway for a guesser.
+create table if not exists connect_code_attempts (
+  id          uuid primary key default uuid_generate_v4(),
+  family_id   uuid not null references families(id) on delete cascade,
+  attempted_at timestamptz not null default now()
+);
+create index if not exists idx_connect_attempts_family_time on connect_code_attempts(family_id, attempted_at);
+alter table connect_code_attempts enable row level security;
+-- No select/insert policies granted — only the security-definer function below touches this table.
+
+create or replace function connect_by_code(p_code text)
+returns table(id uuid, name text, animal text) language plpgsql security definer as $$
+declare
+  v_me             uuid;
+  v_target         families%rowtype;
+  v_recent_attempts int;
+begin
+  v_me := current_family_id();
+  if v_me is null then raise exception 'Not authenticated'; end if;
+
+  select count(*) into v_recent_attempts
+    from connect_code_attempts
+    where family_id = v_me and attempted_at > now() - interval '15 minutes';
+  if v_recent_attempts >= 10 then
+    raise exception 'Too many attempts. Please wait a few minutes and try again.';
+  end if;
+
+  insert into connect_code_attempts (family_id) values (v_me);
+
+  select * into v_target from families
+    where connect_code = upper(trim(p_code)) and is_active;
+  if not found then raise exception 'Invalid code'; end if;
+  if v_target.id = v_me then raise exception 'That is your own code'; end if;
+
+  if exists (
+    select 1 from connections
+    where (requester_id = v_me and recipient_id = v_target.id)
+       or (requester_id = v_target.id and recipient_id = v_me)
+  ) then
+    update connections set status = 'accepted'
+      where (requester_id = v_me and recipient_id = v_target.id)
+         or (requester_id = v_target.id and recipient_id = v_me);
+  else
+    insert into connections (requester_id, recipient_id, status)
+      values (v_me, v_target.id, 'accepted');
+  end if;
+
+  return query select v_target.id, v_target.name, v_target.animal;
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: Self-service account deletion
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 36. App Store / Play Store require in-app account deletion, not just
+--     admin-initiated removal (admin.tsx already has that). A household
+--     is shared by up to two auth users (owner + partner), so "delete my
+--     account" means different things depending on who's asking:
+--     the owner deleting takes the whole household down (same PII scrub
+--     as admin removal, so other households' shared history stays
+--     intact); a partner deleting just unlinks themselves and leaves the
+--     household — and the owner — untouched.
+create or replace function delete_own_account()
+returns void language plpgsql security definer as $$
+declare
+  v_family_id uuid;
+  v_is_partner boolean;
+begin
+  select id, (partner_user_id = auth.uid()) into v_family_id, v_is_partner
+    from families
+    where (user_id = auth.uid() or partner_user_id = auth.uid()) and is_active
+    limit 1;
+
+  if v_family_id is null then raise exception 'Not authenticated'; end if;
+
+  if v_is_partner then
+    update families set partner_user_id = null, partner_push_token = null
+      where id = v_family_id;
+  else
+    update families set
+      is_active = false,
+      discoverable = false,
+      parent1_name = null,
+      parent1_phone = null,
+      parent2_name = null,
+      parent2_phone = null,
+      address = null,
+      emergency_contact = null,
+      kids_info = null,
+      kids_data = null,
+      push_token = null,
+      partner_push_token = null,
+      connect_code = null
+    where id = v_family_id;
+  end if;
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: Allow deleting your own never-accepted posts
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 38. requests had no delete policy at all, so "Cancel Request" on an
+--     open (unaccepted) post could only soft-mark it 'cancelled' —
+--     it kept cluttering "My Requests" despite the app telling the user
+--     it would "remove the post from the board". Only lets you delete
+--     your own posts while still 'open': once something's been offered,
+--     accepted, or completed there's a transaction/history tied to it,
+--     so that path stays a status change (cancel_accepted_request), not
+--     a delete.
+drop policy if exists "requests_delete" on requests;
+create policy "requests_delete" on requests for delete to authenticated using (
+  requesting_family_id = current_family_id() and status = 'open'
+);
+
+-- ============================================================
 -- SEED: create the admin household
 -- After running this schema, sign up via the app with:
 --   email: lindsayomaits@gmail.com

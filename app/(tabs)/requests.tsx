@@ -9,7 +9,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
-import { notifyFamily, notifyAllFamilies } from '../../lib/notifications';
+import { notifyFamily, notifyConnections } from '../../lib/notifications';
 import type { Request, RequestCategory } from '../../types';
 
 type Filter = 'open' | 'mine' | 'upcoming';
@@ -59,7 +59,8 @@ export default function RequestsScreen() {
       .from('requests')
       .select('*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*)')
       .eq('post_type', postType)
-      .order('date', { ascending: true });
+      .order('date', { ascending: true })
+      .order('start_time', { ascending: true });
 
     if (catFilter !== 'all') query = query.eq('category', catFilter);
 
@@ -237,7 +238,7 @@ export default function RequestsScreen() {
       {
         text: 'Yes, done!', onPress: async () => {
           await supabase.from('requests').update({ status: 'completed' }).eq('id', req.id);
-          await notifyAllFamilies(family?.id ?? '', '🎉 Completed!', `${req.fulfilling_family?.name} helped ${req.requesting_family?.name}`);
+          await notifyConnections(family?.id ?? '', '🎉 Completed!', `${req.fulfilling_family?.name} helped ${req.requesting_family?.name}`);
           loadRequests();
         },
       },
@@ -248,7 +249,7 @@ export default function RequestsScreen() {
     Alert.alert('Cancel this?', 'This will remove the post from the board.', [
       { text: 'Keep it', style: 'cancel' },
       { text: 'Cancel', style: 'destructive', onPress: async () => {
-        await supabase.from('requests').update({ status: 'cancelled' }).eq('id', req.id);
+        await supabase.from('requests').delete().eq('id', req.id);
         loadRequests();
       }},
     ]);
@@ -544,10 +545,10 @@ export default function RequestsScreen() {
       {/* Post type toggle */}
       <View style={styles.postTypeRow}>
         <TouchableOpacity style={[styles.postTypeBtn, postType === 'request' && styles.postTypeBtnActive]} onPress={() => switchPostType('request')}>
-          <Text style={[styles.postTypeText, postType === 'request' && styles.postTypeTextActive]}>📋 Needs help</Text>
+          <Text style={[styles.postTypeText, postType === 'request' && styles.postTypeTextActive]}>I need help</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.postTypeBtn, postType === 'offering' && styles.postTypeBtnActiveGreen]} onPress={() => switchPostType('offering')}>
-          <Text style={[styles.postTypeText, postType === 'offering' && styles.postTypeTextActiveGreen]}>🙋 Can help</Text>
+          <Text style={[styles.postTypeText, postType === 'offering' && styles.postTypeTextActiveGreen]}>I can help</Text>
         </TouchableOpacity>
       </View>
 

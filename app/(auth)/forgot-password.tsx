@@ -17,7 +17,9 @@ export default function ForgotPasswordScreen() {
   async function handleReset() {
     if (!email) return Alert.alert('Please enter your email address');
     setLoading(true);
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase());
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo: 'babysitexchange://reset-password',
+    });
     setLoading(false);
     if (error) return Alert.alert('Error', error.message);
     setSent(true);
