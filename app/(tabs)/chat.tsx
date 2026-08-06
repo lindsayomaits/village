@@ -10,7 +10,7 @@ import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
-import { notifyVillage } from '../../lib/notifications';
+import { notifyVillage, notifyFamily } from '../../lib/notifications';
 import type { Post, Family, PostReaction, Request, MentionTarget } from '../../types';
 
 type Tab = 'village' | 'direct';
@@ -59,6 +59,19 @@ function extractMentionedTargets(body: string, entries: MentionEntry[]): { famil
   while ((m = pattern.exec(body)) !== null) {
     const entry = sorted.find(e => e.label === m![1]);
     if (entry) found.push({ familyId: entry.familyId, target: entry.target });
+  }
+  return found;
+}
+
+function extractTaggedRequests(body: string, openRequests: Request[]): Request[] {
+  if (openRequests.length === 0) return [];
+  const sorted = [...openRequests].sort((a, b) => b.title.length - a.title.length);
+  const pattern = new RegExp(`#(${sorted.map(r => escapeRegex(r.title)).join('|')})(?=\\s|$)`, 'g');
+  const found: Request[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(body)) !== null) {
+    const req = sorted.find(r => r.title === m![1]);
+    if (req) found.push(req);
   }
   return found;
 }
@@ -172,7 +185,8 @@ export default function ChatScreen() {
   // Households you've messaged before but aren't connected to anymore —
   // history stays reachable (read-only) instead of just vanishing.
   const pastConversations = families.filter(f => !connectedIds.has(f.id) && dmHistoryIds.has(f.id));
-  const mentionEntries = buildMentionEntries(families);
+  // Only people you're connected to are taggable — not the whole village.
+  const mentionEntries = buildMentionEntries(directFamilies);
 
   const activeTrigger = getActiveTrigger(postBody, cursorPos);
   const mentionResults = activeTrigger?.type === '@'
@@ -390,6 +404,10 @@ export default function ChatScreen() {
 
     if (data) setPosts(prev => [data, ...prev]);
     notifyVillage(family.id, family.name, body, extractMentionedTargets(body, mentionEntries)).catch(() => {});
+    for (const req of extractTaggedRequests(body, openRequests)) {
+      if (req.requesting_family_id === family.id) continue;
+      notifyFamily(req.requesting_family_id, `📌 ${family.name} tagged your post`, `"${req.title}" was mentioned in Village Chat`).catch(() => {});
+    }
     setPosting(false);
   }
 
@@ -563,11 +581,11 @@ export default function ChatScreen() {
 
       <View style={styles.tabs}>
         <TouchableOpacity style={[styles.tab, tab === 'village' && styles.tabActive]} onPress={() => setTab('village')}>
-          <Text style={[styles.tabText, tab === 'village' && styles.tabTextActive]}>VillageMates Chat</Text>
+          <Text style={[styles.tabText, tab === 'village' && styles.tabTextActive]}>Village Chat</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.tab, tab === 'direct' && styles.tabActive]} onPress={() => setTab('direct')}>
           <Text style={[styles.tabText, tab === 'direct' && styles.tabTextActive]}>
-            Direct{totalUnread > 0 ? ` (${totalUnread})` : ''}
+            Direct Messages{totalUnread > 0 ? ` (${totalUnread})` : ''}
           </Text>
         </TouchableOpacity>
       </View>

@@ -69,7 +69,7 @@ export default function RequestsScreen() {
     } else if (filter === 'mine') {
       query = query
         .eq('requesting_family_id', family?.id ?? '')
-        .in('status', ['open', 'offered', 'accepted', 'completed', 'cancelled']);
+        .in('status', ['open', 'offered', 'accepted', 'completed']);
     } else if (filter === 'upcoming') {
       query = query
         .in('status', ['offered', 'accepted'])
@@ -78,7 +78,16 @@ export default function RequestsScreen() {
     }
 
     const { data } = await query;
-    setRequests(data ?? []);
+    // Past-due (date already gone, still unresolved) sinks to the bottom
+    // instead of cluttering the top of an ascending date sort.
+    const sorted = [...(data ?? [])].sort((a, b) => {
+      const aPast = a.status !== 'completed' && a.date < today;
+      const bPast = b.status !== 'completed' && b.date < today;
+      if (aPast !== bPast) return aPast ? 1 : -1;
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return a.start_time.localeCompare(b.start_time);
+    });
+    setRequests(sorted);
     setLoading(false);
   }
 
@@ -325,15 +334,16 @@ export default function RequestsScreen() {
     const isFulfiller = item.fulfilling_family_id === family?.id;
     const isConfirmed = item.status === 'accepted' || item.status === 'completed';
     const hasOffer = item.status === 'offered';
+    const isPastDue = item.status !== 'completed' && item.date < new Date().toISOString().split('T')[0];
 
     const contactFamily = isOwn ? item.fulfilling_family : item.requesting_family;
     const showContact = (hasOffer || isConfirmed) && contactFamily;
 
     return (
-      <View style={[styles.card, isOffering && styles.cardOffering]}>
+      <View style={[styles.card, isOffering && styles.cardOffering, isPastDue && styles.cardPastDue]}>
         <View style={styles.cardHeader}>
-          <Text style={styles.cardTitle}>{item.title}</Text>
-          {statusBadge(item.status)}
+          <Text style={[styles.cardTitle, isPastDue && styles.cardTitlePastDue]}>{item.title}</Text>
+          {isPastDue ? <View style={[styles.badge, styles.pastDueBadge]}><Text style={[styles.badgeText, styles.pastDueBadgeText]}>⏰ Past date</Text></View> : statusBadge(item.status)}
         </View>
 
         <Text style={styles.cardFamily}>
@@ -636,10 +646,14 @@ const styles = StyleSheet.create({
   list: { paddingHorizontal: 20, paddingBottom: 32 },
   card: { backgroundColor: colors.card, borderRadius: 18, padding: 16, marginBottom: 12, borderWidth: 1.5, borderColor: colors.borderLight, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   cardOffering: { borderColor: colors.green + '60', borderWidth: 1.5 },
+  cardPastDue: { opacity: 0.55, borderColor: colors.red + '60', shadowOpacity: 0 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 },
   cardTitle: { fontSize: 16, fontWeight: '700', color: colors.text, flex: 1, marginRight: 8 },
+  cardTitlePastDue: { color: colors.textMuted },
   badge: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 8 },
   badgeText: { fontSize: 12, fontWeight: '700' },
+  pastDueBadge: { backgroundColor: colors.redLight },
+  pastDueBadgeText: { color: colors.red },
   cardFamily: { fontSize: 13, color: colors.textSecondary, marginBottom: 8, fontWeight: '500' },
   cardMeta: { flexDirection: 'row', gap: 12, marginBottom: 8, flexWrap: 'wrap' },
   metaText: { fontSize: 13, color: colors.text, fontWeight: '500' },

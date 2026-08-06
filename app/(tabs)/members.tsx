@@ -1,11 +1,11 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, ActivityIndicator, Modal, ScrollView, Alert, TextInput, Switch,
 } from 'react-native';
 import { Text } from '../../components/Text';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
@@ -31,6 +31,7 @@ const CATEGORY_LABELS: Record<string, { emoji: string; label: string }> = {
 export default function MembersScreen() {
   const { family: myHousehold } = useAuth();
   const router = useRouter();
+  const params = useLocalSearchParams<{ tab?: string }>();
 
   const [tab, setTab] = useState<Tab>('my_network');
   const [allHouseholds, setAllHouseholds] = useState<Family[]>([]);
@@ -65,6 +66,12 @@ export default function MembersScreen() {
     setConnections((connectionsRes.data ?? []) as Connection[]);
     setLoading(false);
   }
+
+  useEffect(() => {
+    if (params.tab === 'my_network' || params.tab === 'find_people' || params.tab === 'pending') {
+      setTab(params.tab);
+    }
+  }, [params.tab]);
 
   useFocusEffect(useCallback(() => { loadData(); }, []));
 

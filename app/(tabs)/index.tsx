@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   View, StyleSheet, ScrollView, TouchableOpacity, Image,
   RefreshControl, ActivityIndicator, Alert,
@@ -19,6 +19,41 @@ export default function HomeScreen() {
   const [myItems, setMyItems] = useState<Request[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const alertedConnectionIds = useRef<Set<string>>(new Set());
+
+  async function checkPendingConnections() {
+    if (!family) return;
+    const { data } = await supabase
+      .from('connections')
+      .select('id, requester_id, requester:families!requester_id(name)')
+      .eq('status', 'pending')
+      .eq('recipient_id', family.id);
+
+    const fresh = (data ?? []).filter(c => !alertedConnectionIds.current.has(c.id));
+    if (fresh.length === 0) return;
+    fresh.forEach(c => alertedConnectionIds.current.add(c.id));
+
+    if (fresh.length === 1) {
+      const requesterName = (fresh[0].requester as unknown as { name: string } | null)?.name ?? 'A household';
+      Alert.alert(
+        'New connection request',
+        `${requesterName} wants to connect with you.`,
+        [
+          { text: 'Later', style: 'cancel' },
+          { text: 'Review', onPress: () => router.push({ pathname: '/(tabs)/members', params: { tab: 'pending' } }) },
+        ]
+      );
+    } else {
+      Alert.alert(
+        'New connection requests',
+        `${fresh.length} households want to connect with you.`,
+        [
+          { text: 'Later', style: 'cancel' },
+          { text: 'Review', onPress: () => router.push({ pathname: '/(tabs)/members', params: { tab: 'pending' } }) },
+        ]
+      );
+    }
+  }
 
   async function loadData() {
     const today = new Date().toISOString().split('T')[0];
@@ -37,6 +72,7 @@ export default function HomeScreen() {
 
   useFocusEffect(useCallback(() => {
     loadData();
+    checkPendingConnections();
   }, [family?.id]));
 
   async function onRefresh() {
