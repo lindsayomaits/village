@@ -106,6 +106,8 @@ export type Transaction = {
   created_at: string;
 };
 
+export type MentionTarget = 'primary' | 'partner' | 'both';
+
 export type Connection = {
   id: string;
   requester_id: string;

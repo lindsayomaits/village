@@ -11,60 +11,147 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import { notifyVillage } from '../../lib/notifications';
-import type { Post, Family, PostReaction } from '../../types';
+import type { Post, Family, PostReaction, Request, MentionTarget } from '../../types';
 
 type Tab = 'village' | 'direct';
 type NotifPref = 'all' | 'mentions' | 'muted';
 
+type MentionEntry = { label: string; familyId: string; target: MentionTarget; animal: string | null };
+
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '👎'];
 
-function getMentionAtCursor(text: string, cursor: number): string | null {
-  const before = text.slice(0, cursor);
-  const match = before.match(/@([^\s]*)$/);
-  return match ? match[1] : null;
-}
-
-function extractMentionedIds(body: string, allFamilies: Family[]): string[] {
-  const ids: string[] = [];
+function buildMentionEntries(allFamilies: Family[]): MentionEntry[] {
+  const entries: MentionEntry[] = [];
   for (const f of allFamilies) {
-    const escaped = f.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (new RegExp(`@${escaped}(?:\\s|$)`).test(body)) ids.push(f.id);
+    const p1 = f.parent1_name?.trim();
+    const p2 = f.parent2_name?.trim();
+    if (p1 && p2 && p1 !== p2) {
+      entries.push({ label: p1, familyId: f.id, target: 'primary', animal: f.animal });
+      entries.push({ label: p2, familyId: f.id, target: 'partner', animal: f.animal });
+      entries.push({ label: `${p1} & ${p2}`, familyId: f.id, target: 'both', animal: f.animal });
+    } else if (p1 || p2) {
+      entries.push({ label: (p1 || p2) as string, familyId: f.id, target: p1 ? 'primary' : 'partner', animal: f.animal });
+    } else {
+      entries.push({ label: f.name, familyId: f.id, target: 'both', animal: f.animal });
+    }
   }
-  return ids;
+  return entries;
 }
 
-function MentionText({
-  body, allFamilies, myFamilyId, isOwn,
-}: {
-  body: string; allFamilies: Family[]; myFamilyId: string; isOwn: boolean;
-}) {
-  const names = allFamilies.map(f => f.name).sort((a, b) => b.length - a.length);
-  if (names.length === 0) {
-    return <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>{body}</Text>;
-  }
-  const escaped = names.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const pattern = new RegExp(`@(${escaped.join('|')})`, 'g');
-  const parts: React.ReactNode[] = [];
-  let last = 0;
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Which trigger (@ for a person, # for a request) is being typed right now, if any.
+function getActiveTrigger(text: string, cursor: number): { type: '@' | '#'; query: string } | null {
+  const before = text.slice(0, cursor);
+  const match = before.match(/([@#])([^\s@#]*)$/);
+  if (!match) return null;
+  return { type: match[1] as '@' | '#', query: match[2] };
+}
+
+function extractMentionedTargets(body: string, entries: MentionEntry[]): { familyId: string; target: MentionTarget }[] {
+  if (entries.length === 0) return [];
+  const sorted = [...entries].sort((a, b) => b.label.length - a.label.length);
+  const pattern = new RegExp(`@(${sorted.map(e => escapeRegex(e.label)).join('|')})(?=\\s|$)`, 'g');
+  const found: { familyId: string; target: MentionTarget }[] = [];
   let m: RegExpExecArray | null;
   while ((m = pattern.exec(body)) !== null) {
-    if (m.index > last) parts.push(body.slice(last, m.index));
-    const mentioned = allFamilies.find(f => f.name === m![1]);
-    const isMe = mentioned?.id === myFamilyId;
-    parts.push(
-      <Text key={m.index} style={[styles.mention, isOwn ? styles.mentionOwn : styles.mentionOther, isMe && (isOwn ? styles.mentionMeOwn : styles.mentionMe)]}>
-        {m[0]}
-      </Text>
-    );
-    last = pattern.lastIndex;
+    const entry = sorted.find(e => e.label === m![1]);
+    if (entry) found.push({ familyId: entry.familyId, target: entry.target });
   }
-  if (last < body.length) parts.push(body.slice(last));
-  return <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>{parts}</Text>;
+  return found;
+}
+
+type Segment =
+  | { type: 'text'; text: string }
+  | { type: 'mention'; label: string; entry: MentionEntry }
+  | { type: 'tag'; label: string; request: Request };
+
+function buildSegments(body: string, mentionEntries: MentionEntry[], openRequests: Request[]): Segment[] {
+  const matches: { index: number; length: number; seg: Segment }[] = [];
+
+  if (mentionEntries.length > 0) {
+    const sorted = [...mentionEntries].sort((a, b) => b.label.length - a.label.length);
+    const pattern = new RegExp(`@(${sorted.map(e => escapeRegex(e.label)).join('|')})(?=\\s|$)`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(body)) !== null) {
+      const entry = sorted.find(e => e.label === m![1]);
+      if (entry) matches.push({ index: m.index, length: m[0].length, seg: { type: 'mention', label: m[0], entry } });
+    }
+  }
+
+  if (openRequests.length > 0) {
+    const sorted = [...openRequests].sort((a, b) => b.title.length - a.title.length);
+    const pattern = new RegExp(`#(${sorted.map(r => escapeRegex(r.title)).join('|')})(?=\\s|$)`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(body)) !== null) {
+      const req = sorted.find(r => r.title === m![1]);
+      if (req) matches.push({ index: m.index, length: m[0].length, seg: { type: 'tag', label: m[0], request: req } });
+    }
+  }
+
+  matches.sort((a, b) => a.index - b.index);
+  const clean: typeof matches = [];
+  let cursor = 0;
+  for (const mm of matches) {
+    if (mm.index < cursor) continue;
+    clean.push(mm);
+    cursor = mm.index + mm.length;
+  }
+
+  const segments: Segment[] = [];
+  let last = 0;
+  for (const mm of clean) {
+    if (mm.index > last) segments.push({ type: 'text', text: body.slice(last, mm.index) });
+    segments.push(mm.seg);
+    last = mm.index + mm.length;
+  }
+  if (last < body.length) segments.push({ type: 'text', text: body.slice(last) });
+  return segments;
+}
+
+function RichText({
+  body, mentionEntries, openRequests, myFamilyId, isPartnerViewer, isOwn, onTagPress,
+}: {
+  body: string; mentionEntries: MentionEntry[]; openRequests: Request[];
+  myFamilyId: string; isPartnerViewer: boolean; isOwn: boolean;
+  onTagPress: (request: Request) => void;
+}) {
+  if (mentionEntries.length === 0 && openRequests.length === 0) {
+    return <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>{body}</Text>;
+  }
+  const segments = buildSegments(body, mentionEntries, openRequests);
+  return (
+    <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>
+      {segments.map((seg, i) => {
+        if (seg.type === 'text') return <Text key={i}>{seg.text}</Text>;
+        if (seg.type === 'mention') {
+          const isMe = seg.entry.familyId === myFamilyId && (
+            seg.entry.target === 'both'
+            || (seg.entry.target === 'primary' && !isPartnerViewer)
+            || (seg.entry.target === 'partner' && isPartnerViewer)
+          );
+          return (
+            <Text key={i} style={[styles.mention, isOwn ? styles.mentionOwn : styles.mentionOther, isMe && (isOwn ? styles.mentionMeOwn : styles.mentionMe)]}>
+              {seg.label}
+            </Text>
+          );
+        }
+        return (
+          <Text key={i} style={[styles.tag, isOwn ? styles.tagOwn : styles.tagOther]} onPress={() => onTagPress(seg.request)}>
+            {seg.label}
+          </Text>
+        );
+      })}
+    </Text>
+  );
 }
 
 export default function ChatScreen() {
-  const { family } = useAuth();
+  const { family, session } = useAuth();
   const router = useRouter();
+  const isPartnerViewer = !!session?.user.id && session.user.id === family?.partner_user_id;
   const [tab, setTab] = useState<Tab>('village');
 
   const [posts, setPosts] = useState<Post[]>([]);
@@ -76,17 +163,32 @@ export default function ChatScreen() {
   const [reactionTarget, setReactionTarget] = useState<Post | null>(null);
 
   const [families, setFamilies] = useState<Family[]>([]);
+  const [connectedIds, setConnectedIds] = useState<Set<string>>(new Set());
+  const [dmHistoryIds, setDmHistoryIds] = useState<Set<string>>(new Set());
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [openRequests, setOpenRequests] = useState<Request[]>([]);
 
-  const mentionQuery = getMentionAtCursor(postBody, cursorPos);
-  const mentionResults = mentionQuery !== null
-    ? families.filter(f => f.name.toLowerCase().startsWith(mentionQuery.toLowerCase())).slice(0, 5)
+  const directFamilies = families.filter(f => connectedIds.has(f.id));
+  // Households you've messaged before but aren't connected to anymore —
+  // history stays reachable (read-only) instead of just vanishing.
+  const pastConversations = families.filter(f => !connectedIds.has(f.id) && dmHistoryIds.has(f.id));
+  const mentionEntries = buildMentionEntries(families);
+
+  const activeTrigger = getActiveTrigger(postBody, cursorPos);
+  const mentionResults = activeTrigger?.type === '@'
+    ? mentionEntries.filter(e => e.label.toLowerCase().startsWith(activeTrigger.query.toLowerCase())).slice(0, 5)
+    : [];
+  const requestResults = activeTrigger?.type === '#'
+    ? openRequests.filter(r => r.title.toLowerCase().startsWith(activeTrigger.query.toLowerCase())).slice(0, 5)
     : [];
 
   useFocusEffect(useCallback(() => {
     loadPosts();
     loadMutes();
     loadFamilies();
+    loadConnections();
+    loadDmHistoryIds();
+    loadOpenRequests();
     loadUnreadCounts();
     setNotifPref(family?.village_notifications ?? 'all');
   }, [family?.id]));
@@ -150,13 +252,68 @@ export default function ChatScreen() {
 
   async function loadFamilies() {
     if (!family) return;
-    const { data, error } = await supabase.from('families_public').select('*').neq('id', family.id).order('name');
+    // families_public covers everyone (name/animal only, no PII); families
+    // additionally returns parent names but only for rows RLS allows (self,
+    // admin, or connected) — merge so connected households get real names
+    // for @mentions while everyone else safely falls back to household name.
+    const [{ data: pub, error }, { data: full }] = await Promise.all([
+      supabase.from('families_public').select('*').neq('id', family.id).order('name'),
+      supabase.from('families').select('*').neq('id', family.id),
+    ]);
     if (error) {
       // eslint-disable-next-line no-console
       console.error('loadFamilies error', error);
       return;
     }
-    setFamilies(data ?? []);
+    const fullById = new Map((full ?? []).map((f: Family) => [f.id, f]));
+    setFamilies((pub ?? []).map((p: Family) => fullById.get(p.id) ?? p));
+  }
+
+  async function loadDmHistoryIds() {
+    if (!family) return;
+    const { data, error } = await supabase
+      .from('direct_messages')
+      .select('from_family_id, to_family_id')
+      .or(`from_family_id.eq.${family.id},to_family_id.eq.${family.id}`);
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error('loadDmHistoryIds error', error);
+      return;
+    }
+    const ids = new Set<string>();
+    for (const row of (data ?? [])) {
+      const otherId = row.from_family_id === family.id ? row.to_family_id : row.from_family_id;
+      if (otherId !== family.id) ids.add(otherId);
+    }
+    setDmHistoryIds(ids);
+  }
+
+  async function loadOpenRequests() {
+    const { data, error } = await supabase
+      .from('requests')
+      .select('*')
+      .eq('status', 'open')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error('loadOpenRequests error', error);
+      return;
+    }
+    setOpenRequests(data ?? []);
+  }
+
+  async function loadConnections() {
+    if (!family) return;
+    const { data, error } = await supabase
+      .from('connections').select('requester_id, recipient_id').eq('status', 'accepted')
+      .or(`requester_id.eq.${family.id},recipient_id.eq.${family.id}`);
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error('loadConnections error', error);
+      return;
+    }
+    setConnectedIds(new Set((data ?? []).map(c => c.requester_id === family.id ? c.recipient_id : c.requester_id)));
   }
 
   async function loadUnreadCounts() {
@@ -189,12 +346,27 @@ export default function ChatScreen() {
     }
   }
 
-  function insertMention(f: Family) {
+  function insertMention(entry: MentionEntry) {
     const before = postBody.slice(0, cursorPos);
     const after = postBody.slice(cursorPos);
-    const newText = before.replace(/@[^\s]*$/, `@${f.name} `) + after;
-    setPostBody(newText);
-    setCursorPos(before.replace(/@[^\s]*$/, `@${f.name} `).length);
+    const newBefore = before.replace(/@[^\s]*$/, `@${entry.label} `);
+    setPostBody(newBefore + after);
+    setCursorPos(newBefore.length);
+  }
+
+  function insertRequestTag(req: Request) {
+    const before = postBody.slice(0, cursorPos);
+    const after = postBody.slice(cursorPos);
+    const newBefore = before.replace(/#[^\s]*$/, `#${req.title} `);
+    setPostBody(newBefore + after);
+    setCursorPos(newBefore.length);
+  }
+
+  function goToTaggedRequest(req: Request) {
+    router.push({
+      pathname: '/(tabs)/requests',
+      params: { postType: req.post_type, filter: req.requesting_family_id === family?.id ? 'mine' : 'open' },
+    });
   }
 
   async function sendPost() {
@@ -217,7 +389,7 @@ export default function ChatScreen() {
     }
 
     if (data) setPosts(prev => [data, ...prev]);
-    notifyVillage(family.id, family.name, body, extractMentionedIds(body, families)).catch(() => {});
+    notifyVillage(family.id, family.name, body, extractMentionedTargets(body, mentionEntries)).catch(() => {});
     setPosting(false);
   }
 
@@ -306,7 +478,15 @@ export default function ChatScreen() {
             <Text style={[styles.bubbleFamily, isOwn && styles.bubbleFamilyOwn]}>
               {getFamilyAnimal(item.family_id, item.family?.animal)}{'  '}{item.family?.name ?? (isOwn ? family?.name : '…')}
             </Text>
-            <MentionText body={item.body} allFamilies={families} myFamilyId={family?.id ?? ''} isOwn={isOwn} />
+            <RichText
+              body={item.body}
+              mentionEntries={mentionEntries}
+              openRequests={openRequests}
+              myFamilyId={family?.id ?? ''}
+              isPartnerViewer={!!isPartnerViewer}
+              isOwn={isOwn}
+              onTagPress={goToTaggedRequest}
+            />
             <Text style={[styles.bubbleTime, isOwn && styles.bubbleTimeOwn]}>{formatTime(item.created_at)}</Text>
             {Object.keys(reactionGroups).length > 0 && (
               <View style={styles.reactionsRow}>
@@ -350,7 +530,12 @@ export default function ChatScreen() {
   };
 
   const visiblePosts = posts.filter(p => !mutes.has(p.family_id));
-  const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
+  // Only count unread from households still connected — otherwise the
+  // badge can promise a count you have no way to open (no row for a
+  // disconnected household in the Direct list below).
+  const totalUnread = Object.entries(unreadCounts)
+    .filter(([familyId]) => connectedIds.has(familyId))
+    .reduce((a, [, count]) => a + count, 0);
   const notifLabel = notifPref === 'all' ? 'All' : notifPref === 'mentions' ? 'Mentions' : 'Muted';
   const notifIcon = notifPref === 'muted' ? '🔕' : '🔔';
   const targetIsOwn = reactionTarget?.family_id === family?.id;
@@ -403,15 +588,28 @@ export default function ChatScreen() {
               contentContainerStyle={styles.postList}
             />
           )}
-          {mentionQuery !== null && mentionResults.length > 0 && (
+          {activeTrigger?.type === '@' && mentionResults.length > 0 && (
             <View style={styles.mentionDropdown}>
-              {mentionResults.map(f => (
-                <TouchableOpacity key={f.id} style={styles.mentionItem} onPress={() => insertMention(f)}>
-                  <Text style={styles.mentionItemEmoji}>{getFamilyAnimal(f.id, f.animal)}</Text>
-                  <Text style={styles.mentionItemName}>{f.name}</Text>
+              {mentionResults.map(e => (
+                <TouchableOpacity key={`${e.familyId}-${e.target}`} style={styles.mentionItem} onPress={() => insertMention(e)}>
+                  <Text style={styles.mentionItemEmoji}>{getFamilyAnimal(e.familyId, e.animal)}</Text>
+                  <Text style={styles.mentionItemName}>{e.label}</Text>
                 </TouchableOpacity>
               ))}
             </View>
+          )}
+          {activeTrigger?.type === '#' && requestResults.length > 0 && (
+            <View style={styles.mentionDropdown}>
+              {requestResults.map(r => (
+                <TouchableOpacity key={r.id} style={styles.mentionItem} onPress={() => insertRequestTag(r)}>
+                  <Text style={styles.mentionItemEmoji}>{r.post_type === 'offering' ? '🙋' : '📋'}</Text>
+                  <Text style={styles.mentionItemName} numberOfLines={1}>{r.title}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+          {!activeTrigger && (
+            <Text style={styles.composerHint}>Type @ to tag someone, # to tag a request</Text>
           )}
           <View style={styles.inputRow}>
             <TextInput
@@ -434,16 +632,34 @@ export default function ChatScreen() {
         </KeyboardAvoidingView>
       ) : (
         <FlatList
-          data={families}
+          data={directFamilies}
           keyExtractor={(item) => item.id}
           renderItem={renderFamily}
           contentContainerStyle={styles.dmList}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text style={styles.emptyIcon}>👥</Text>
-              <Text style={styles.emptyText}>No other families yet</Text>
+              <Text style={styles.emptyText}>Connect with households in Members to start a chat</Text>
             </View>
           }
+          ListFooterComponent={pastConversations.length > 0 ? (
+            <View style={styles.pastConvoSection}>
+              <Text style={styles.pastConvoHeader}>Past Conversations</Text>
+              <Text style={styles.pastConvoHint}>No longer connected — you can still read, not send.</Text>
+              {pastConversations.map(item => (
+                <TouchableOpacity
+                  key={item.id}
+                  style={[styles.dmRow, styles.dmRowPast]}
+                  onPress={() => router.push({ pathname: '/dm/[familyId]', params: { familyId: item.id, name: item.name } })}
+                >
+                  <View style={styles.dmAvatar}>
+                    <Text style={styles.dmAvatarText}>{getFamilyAnimal(item.id, item.animal)}</Text>
+                  </View>
+                  <Text style={styles.dmName}>{item.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : null}
         />
       )}
 
@@ -542,6 +758,9 @@ const styles = StyleSheet.create({
   mentionOwn: { color: 'rgba(255,255,255,0.95)' },
   mentionMe: { color: colors.primary },
   mentionMeOwn: { color: '#fff', textDecorationLine: 'underline' },
+  tag: { fontWeight: '700', textDecorationLine: 'underline' },
+  tagOther: { color: colors.primary },
+  tagOwn: { color: '#fff' },
   reactionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 8 },
   reactionPill: {
     flexDirection: 'row', alignItems: 'center',
@@ -554,6 +773,10 @@ const styles = StyleSheet.create({
   mentionItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
   mentionItemEmoji: { fontSize: 18 },
   mentionItemName: { fontSize: 15, fontWeight: '600', color: colors.text },
+  composerHint: {
+    fontSize: 11, color: colors.textMuted, fontWeight: '500',
+    textAlign: 'center', paddingVertical: 4, backgroundColor: colors.card,
+  },
   inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.borderLight, backgroundColor: colors.card },
   input: { flex: 1, backgroundColor: colors.background, borderWidth: 1.5, borderColor: colors.border, borderRadius: 22, paddingHorizontal: 16, paddingVertical: 10, fontSize: 15, color: colors.text, maxHeight: 100 },
   sendBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.sage, alignItems: 'center', justifyContent: 'center' },
@@ -566,6 +789,10 @@ const styles = StyleSheet.create({
   dmName: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.text },
   unreadBadge: { backgroundColor: colors.primary, borderRadius: 12, minWidth: 24, height: 24, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
   unreadText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  pastConvoSection: { marginTop: 16 },
+  pastConvoHeader: { fontSize: 13, fontWeight: '700', color: colors.textMuted, marginBottom: 2 },
+  pastConvoHint: { fontSize: 12, color: colors.textMuted, marginBottom: 10 },
+  dmRowPast: { opacity: 0.6 },
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyIcon: { fontSize: 40, marginBottom: 10 },
   emptyText: { fontSize: 15, color: colors.textMuted, fontWeight: '500', textAlign: 'center' },

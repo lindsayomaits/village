@@ -10,7 +10,9 @@ import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { notifyFamily } from '../../lib/notifications';
-import type { DirectMessage } from '../../types';
+import { getFamilyAnimal } from '../../lib/animals';
+import { lastNamesLabel } from '../../lib/utils';
+import type { DirectMessage, Family } from '../../types';
 
 export default function DMScreen() {
   const { familyId, name } = useLocalSearchParams<{ familyId: string; name: string }>();
@@ -19,12 +21,16 @@ export default function DMScreen() {
   const [messages, setMessages] = useState<DirectMessage[]>([]);
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
+  const [otherFamily, setOtherFamily] = useState<Family | null>(null);
+  const [isConnected, setIsConnected] = useState<boolean | null>(null);
 
-  const otherName = Array.isArray(name) ? name[0] : (name ?? '');
+  const otherName = otherFamily ? lastNamesLabel(otherFamily) : (Array.isArray(name) ? name[0] : (name ?? ''));
   const otherId = Array.isArray(familyId) ? familyId[0] : (familyId ?? '');
 
   useEffect(() => {
     loadMessages();
+    loadOtherFamily();
+    loadConnectionStatus();
     markRead();
 
     const channel = supabase
@@ -44,6 +50,22 @@ export default function DMScreen() {
 
     return () => { supabase.removeChannel(channel); };
   }, [otherId]);
+
+  async function loadOtherFamily() {
+    const { data } = await supabase.from('families').select('*').eq('id', otherId).single();
+    if (data) setOtherFamily(data);
+  }
+
+  async function loadConnectionStatus() {
+    if (!family) return;
+    const { data } = await supabase
+      .from('connections')
+      .select('status')
+      .eq('status', 'accepted')
+      .or(`and(requester_id.eq.${family.id},recipient_id.eq.${otherId}),and(requester_id.eq.${otherId},recipient_id.eq.${family.id})`)
+      .maybeSingle();
+    setIsConnected(!!data);
+  }
 
   async function loadMessages() {
     if (!family) return;
@@ -106,14 +128,19 @@ export default function DMScreen() {
         <TouchableOpacity onPress={() => router.back()}>
           <Text style={styles.back}>← Back</Text>
         </TouchableOpacity>
-        <Text style={styles.headerName} numberOfLines={1}>{otherName}</Text>
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerAvatar}>{getFamilyAnimal(otherId, otherFamily?.animal ?? null)}</Text>
+          <Text style={styles.headerName} numberOfLines={1}>{otherName}</Text>
+        </View>
         <View style={{ width: 60 }} />
       </View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         {messages.length === 0 ? (
           <View style={[styles.empty, { flex: 1 }]}>
-            <Text style={styles.emptyText}>Send the first message to {otherName}!</Text>
+            <Text style={styles.emptyText}>
+              {isConnected === false ? `No messages with ${otherName}.` : `Send the first message to ${otherName}!`}
+            </Text>
           </View>
         ) : (
           <FlatList
@@ -124,6 +151,11 @@ export default function DMScreen() {
             contentContainerStyle={styles.list}
           />
         )}
+        {isConnected === false ? (
+          <View style={styles.reconnectBanner}>
+            <Text style={styles.reconnectText}>You're no longer connected — you can read past messages, but reconnect in VillageMates to send new ones.</Text>
+          </View>
+        ) : (
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
@@ -141,6 +173,7 @@ export default function DMScreen() {
             <Text style={styles.sendIcon}>↑</Text>
           </TouchableOpacity>
         </View>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -154,7 +187,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: colors.borderLight, backgroundColor: colors.card,
   },
   back: { fontSize: 16, color: colors.primary, fontWeight: '600', width: 60 },
-  headerName: { fontSize: 17, fontWeight: '800', color: colors.text, flex: 1, textAlign: 'center' },
+  headerCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  headerAvatar: { fontSize: 20 },
+  headerName: { fontSize: 17, fontWeight: '800', color: colors.text, textAlign: 'center' },
   list: { paddingHorizontal: 16, paddingBottom: 8 },
   msgRow: { marginBottom: 6 },
   msgRowOwn: { alignItems: 'flex-end' },
@@ -182,6 +217,11 @@ const styles = StyleSheet.create({
   },
   sendBtnDisabled: { backgroundColor: colors.border },
   sendIcon: { fontSize: 18, color: '#fff', fontWeight: '800' },
+  reconnectBanner: {
+    paddingHorizontal: 20, paddingVertical: 14, borderTopWidth: 1,
+    borderTopColor: colors.borderLight, backgroundColor: colors.card,
+  },
+  reconnectText: { fontSize: 13, color: colors.textMuted, textAlign: 'center', lineHeight: 18, fontWeight: '500' },
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyText: { fontSize: 15, color: colors.textMuted, fontWeight: '500', textAlign: 'center' },
 });

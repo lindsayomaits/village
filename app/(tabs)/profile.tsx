@@ -189,7 +189,7 @@ export default function ProfileScreen() {
             placeholder="e.g. The Smith Household" placeholderTextColor={colors.textMuted} />
 
           {/* Parent 1 */}
-          <Text style={styles.sectionHead}>Parent 1</Text>
+          <Text style={styles.sectionHead}>Adult 1</Text>
           <Text style={styles.label}>Name</Text>
           <TextInput style={styles.input} value={parent1Name} onChangeText={field(setParent1Name)}
             placeholder="e.g. Sarah Smith" placeholderTextColor={colors.textMuted} />
@@ -198,7 +198,7 @@ export default function ProfileScreen() {
             placeholder="e.g. (555) 123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" />
 
           {/* Parent 2 */}
-          <Text style={styles.sectionHead}>Parent 2</Text>
+          <Text style={styles.sectionHead}>Adult 2</Text>
           <Text style={styles.label}>Name</Text>
           <TextInput style={styles.input} value={parent2Name} onChangeText={field(setParent2Name)}
             placeholder="e.g. Tom Smith" placeholderTextColor={colors.textMuted} />

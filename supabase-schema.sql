@@ -1132,6 +1132,19 @@ create policy "requests_delete" on requests for delete to authenticated using (
 );
 
 -- ============================================================
+-- MIGRATION: DMs require an accepted connection
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 39. dm_insert had no connection check at all — anyone authenticated
+--     could message any household directly regardless of connection
+--     status, the UI just didn't happen to offer a button for it. This
+--     closes the actual gap, not just the button.
+drop policy if exists "dm_insert" on direct_messages;
+create policy "dm_insert" on direct_messages for insert to authenticated
+  with check (from_family_id = current_family_id() and (are_connected(from_family_id, to_family_id) or is_admin()));
+
+-- ============================================================
 -- SEED: create the admin household
 -- After running this schema, sign up via the app with:
 --   email: lindsayomaits@gmail.com

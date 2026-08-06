@@ -1,3 +1,11 @@
+export function lastNamesLabel(f: { name: string; parent1_name: string | null; parent2_name: string | null }): string {
+  const lastName = (full: string) => full.trim().split(/\s+/).pop() ?? '';
+  const l1 = f.parent1_name ? lastName(f.parent1_name) : '';
+  const l2 = f.parent2_name ? lastName(f.parent2_name) : '';
+  if (l1 && l2) return l1 === l2 ? l1 : `${l1} & ${l2}`;
+  return l1 || l2 || f.name;
+}
+
 export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }

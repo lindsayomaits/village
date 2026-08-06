@@ -54,7 +54,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="members"
         options={{
-          tabBarLabel: 'Members',
+          tabBarLabel: 'VillageMates',
           tabBarIcon: ({ focused }) => tabIcon(focused, 'people-outline', 'people'),
         }}
       />

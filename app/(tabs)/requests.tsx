@@ -1,11 +1,11 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
 import { Text } from '../../components/Text';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
@@ -28,6 +28,7 @@ const ALL_CATEGORIES: { key: RequestCategory; emoji: string; label: string }[] =
 export default function RequestsScreen() {
   const { family, refreshFamily } = useAuth();
   const router = useRouter();
+  const params = useLocalSearchParams<{ postType?: string; filter?: string }>();
   const [requests, setRequests] = useState<Request[]>([]);
   const [connectedIds, setConnectedIds] = useState<string[]>([]);
   const [postType, setPostType] = useState<'request' | 'offering'>('request');
@@ -53,7 +54,6 @@ export default function RequestsScreen() {
   async function loadRequests() {
     const today = new Date().toISOString().split('T')[0];
     const ids = await loadConnections();
-    const networkIds = [...(ids ?? []), family?.id ?? ''];
 
     let query = supabase
       .from('requests')
@@ -65,7 +65,7 @@ export default function RequestsScreen() {
     if (catFilter !== 'all') query = query.eq('category', catFilter);
 
     if (filter === 'open') {
-      query = query.eq('status', 'open').in('requesting_family_id', networkIds);
+      query = query.eq('status', 'open').in('requesting_family_id', ids ?? []);
     } else if (filter === 'mine') {
       query = query
         .eq('requesting_family_id', family?.id ?? '')
@@ -81,6 +81,11 @@ export default function RequestsScreen() {
     setRequests(data ?? []);
     setLoading(false);
   }
+
+  useEffect(() => {
+    if (params.postType === 'request' || params.postType === 'offering') setPostType(params.postType);
+    if (params.filter === 'open' || params.filter === 'mine' || params.filter === 'upcoming') setFilter(params.filter);
+  }, [params.postType, params.filter]);
 
   useFocusEffect(useCallback(() => { loadRequests(); }, [filter, postType, catFilter]));
 
@@ -528,7 +533,7 @@ export default function RequestsScreen() {
   };
 
   const statusFilters: { key: Filter; label: string }[] = [
-    { key: 'open',     label: postType === 'offering' ? 'Available' : 'Open' },
+    { key: 'open',     label: postType === 'offering' ? 'Available' : 'Open Requests' },
     { key: 'mine',     label: postType === 'offering' ? 'My Offers' : 'My Requests' },
     { key: 'upcoming', label: 'Upcoming' },
   ];

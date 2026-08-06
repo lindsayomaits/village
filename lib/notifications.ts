@@ -148,7 +148,7 @@ export async function notifyVillage(
   senderFamilyId: string,
   senderName: string,
   body: string,
-  mentionedFamilyIds: string[],
+  mentionedTargets: { familyId: string; target: 'primary' | 'partner' | 'both' }[],
 ) {
   const { data } = await supabase
     .from('families')
@@ -160,11 +160,18 @@ export async function notifyVillage(
   for (const f of (data ?? [])) {
     const pref = f.village_notifications ?? 'all';
     if (pref === 'muted') continue;
-    const isMentioned = mentionedFamilyIds.includes(f.id);
+    const mention = mentionedTargets.find(t => t.familyId === f.id);
+    const isMentioned = !!mention;
     if (pref === 'mentions' && !isMentioned) continue;
 
     const title = isMentioned ? `${senderName} mentioned you` : `${senderName} in VillageMates`;
-    for (const to of validTokens(f.push_token, f.partner_push_token)) {
+    // A mention pings only the tagged person's device; an ordinary
+    // broadcast (not mentioned, pref = 'all') still reaches the whole household.
+    const tokens = !isMentioned ? validTokens(f.push_token, f.partner_push_token)
+      : mention.target === 'primary' ? validTokens(f.push_token)
+      : mention.target === 'partner' ? validTokens(f.partner_push_token)
+      : validTokens(f.push_token, f.partner_push_token);
+    for (const to of tokens) {
       messages.push({ to, title, body, sound: 'default' });
     }
   }

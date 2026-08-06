@@ -443,7 +443,7 @@ export default function MembersScreen() {
 
                 {(selected.parent1_name || selected.parent1_phone) && (
                   <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Parent 1</Text>
+                    <Text style={styles.infoLabel}>Adult 1</Text>
                     <View style={styles.infoRight}>
                       {selected.parent1_name && <Text style={styles.infoValue}>{selected.parent1_name}</Text>}
                       {selected.parent1_phone && <Text style={styles.infoSub}>{formatPhone(selected.parent1_phone)}</Text>}
@@ -453,7 +453,7 @@ export default function MembersScreen() {
 
                 {(selected.parent2_name || selected.parent2_phone) && (
                   <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Parent 2</Text>
+                    <Text style={styles.infoLabel}>Adult 2</Text>
                     <View style={styles.infoRight}>
                       {selected.parent2_name && <Text style={styles.infoValue}>{selected.parent2_name}</Text>}
                       {selected.parent2_phone && <Text style={styles.infoSub}>{formatPhone(selected.parent2_phone)}</Text>}
@@ -526,9 +526,16 @@ export default function MembersScreen() {
                       </TouchableOpacity>
                     )}
 
-                    {status === 'pending_sent' && (
+                    {status === 'pending_sent' && conn && (
                       <View style={styles.pendingInfo}>
                         <Text style={styles.pendingInfoText}>Connection request sent — waiting for them to accept.</Text>
+                        <TouchableOpacity
+                          style={styles.revokeBtn}
+                          onPress={() => declineConnection(conn)}
+                          disabled={actionLoading}
+                        >
+                          <Text style={styles.revokeBtnText}>Revoke Request</Text>
+                        </TouchableOpacity>
                       </View>
                     )}
 
@@ -750,8 +757,10 @@ const styles = StyleSheet.create({
     shadowColor: colors.sage, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 4,
   },
   connectBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  pendingInfo: { backgroundColor: colors.amberLight, borderRadius: 14, padding: 14, width: '100%', borderWidth: 1, borderColor: colors.amber },
+  pendingInfo: { backgroundColor: colors.amberLight, borderRadius: 14, padding: 14, width: '100%', borderWidth: 1, borderColor: colors.amber, gap: 10 },
   pendingInfoText: { fontSize: 14, color: colors.amber, fontWeight: '600', textAlign: 'center' },
+  revokeBtn: { alignItems: 'center', paddingVertical: 8 },
+  revokeBtnText: { color: colors.red, fontWeight: '700', fontSize: 13 },
   incomingActions: { width: '100%', gap: 10 },
   disconnectBtn: {
     borderRadius: 16, paddingVertical: 14, alignItems: 'center', width: '100%',

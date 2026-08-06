@@ -196,7 +196,7 @@ export default function HomeScreen() {
                         isOffer ? styles.itemCardOffer : styles.itemCardRequest,
                         r.status === 'accepted' && (isOffer ? styles.itemCardOfferAccepted : styles.itemCardAccepted),
                       ]}
-                      onPress={() => router.push('/(tabs)/requests')}
+                      onPress={() => router.push({ pathname: '/(tabs)/requests', params: { postType: r.post_type, filter: 'mine' } })}
                     >
                       <View style={styles.itemCardLeft}>
                         <View style={[styles.postTypePill, { backgroundColor: isOffer ? colors.sage : colors.primary }]}>
