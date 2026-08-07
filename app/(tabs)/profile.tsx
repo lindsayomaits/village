@@ -12,7 +12,7 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal, ANIMALS } from '../../lib/animals';
 import { calcAge } from '../../lib/utils';
-import type { KidEntry } from '../../types';
+import type { KidEntry, Block } from '../../types';
 
 export default function ProfileScreen() {
   const { family, session, signOut, refreshFamily } = useAuth();
@@ -35,8 +35,33 @@ export default function ProfileScreen() {
   const [generatingInvite, setGeneratingInvite] = useState(false);
   const [togglingDiscoverable, setTogglingDiscoverable] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
+  const [blockedHouseholds, setBlockedHouseholds] = useState<Block[]>([]);
+
+  async function loadBlocked() {
+    if (!family) return;
+    const { data: blocks } = await supabase
+      .from('blocks')
+      .select('*')
+      .eq('blocker_id', family.id)
+      .order('created_at', { ascending: false });
+    const blockedIds = (blocks ?? []).map(b => b.blocked_id);
+    if (blockedIds.length === 0) { setBlockedHouseholds([]); return; }
+    // families_public (not families) so this still resolves even if you
+    // blocked someone you were never connected to — full family rows are
+    // PII-gated by connection and wouldn't return a row for them.
+    const { data: names } = await supabase.from('families_public').select('id, name').in('id', blockedIds);
+    const nameById = new Map((names ?? []).map(n => [n.id, n.name]));
+    setBlockedHouseholds((blocks ?? []).map(b => ({ ...b, blocked: nameById.has(b.blocked_id) ? { name: nameById.get(b.blocked_id) } as Block['blocked'] : undefined })));
+  }
+
+  async function unblockHousehold(blockId: string) {
+    const { error } = await supabase.from('blocks').delete().eq('id', blockId);
+    if (error) return Alert.alert('Error', error.message);
+    setBlockedHouseholds(prev => prev.filter(b => b.id !== blockId));
+  }
 
   useFocusEffect(useCallback(() => {
+    loadBlocked();
     if (family) {
       setName(family.name ?? '');
       setParent1Name(family.parent1_name ?? '');
@@ -376,6 +401,20 @@ export default function ProfileScreen() {
             />
           </View>
 
+          {blockedHouseholds.length > 0 && (
+            <>
+              <Text style={styles.sectionHead}>Blocked Households</Text>
+              {blockedHouseholds.map(b => (
+                <View key={b.id} style={styles.blockedRow}>
+                  <Text style={styles.blockedName}>{b.blocked?.name ?? 'Household'}</Text>
+                  <TouchableOpacity onPress={() => unblockHousehold(b.id)}>
+                    <Text style={styles.unblockText}>Unblock</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </>
+          )}
+
           <TouchableOpacity style={styles.historyBtn} onPress={() => router.push('/history')}>
             <Text style={styles.historyBtnText}>View Hour History</Text>
           </TouchableOpacity>
@@ -495,6 +534,13 @@ const styles = StyleSheet.create({
     paddingVertical: 8, marginBottom: 8,
   },
   discoverableLabel: { fontSize: 15, color: colors.text, fontWeight: '600', marginBottom: 4 },
+  blockedRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: 10, paddingHorizontal: 14, backgroundColor: colors.card,
+    borderRadius: 12, borderWidth: 1.5, borderColor: colors.borderLight, marginBottom: 8,
+  },
+  blockedName: { fontSize: 14, color: colors.text, fontWeight: '600' },
+  unblockText: { fontSize: 13, color: colors.primary, fontWeight: '700' },
   historyBtn: {
     marginTop: 12, borderRadius: 16, paddingVertical: 16, alignItems: 'center',
     backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.borderLight,

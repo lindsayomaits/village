@@ -129,6 +129,20 @@ export async function notifyConnections(
   await sendPush(tokens.map(to => ({ to, title, body, sound: 'default' })));
 }
 
+export async function notifyAdmins(
+  title: string,
+  body: string,
+) {
+  // Plain families select would be RLS-blocked when the caller (often just
+  // a regular reporting household) isn't connected to the admin — this
+  // needs to work regardless, so it goes through a security-definer RPC
+  // rather than a direct table read.
+  const { data } = await supabase.rpc('get_admin_push_tokens');
+  const tokens: string[] = (data ?? []).flatMap((f: { push_token: string | null; partner_push_token: string | null }) =>
+    validTokens(f.push_token, f.partner_push_token));
+  await sendPush(tokens.map((to: string) => ({ to, title, body, sound: 'default' })));
+}
+
 export async function notifyFamily(
   familyId: string,
   title: string,

@@ -169,6 +169,7 @@ export default function ChatScreen() {
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [mutes, setMutes] = useState<Set<string>>(new Set());
+  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
   const [postBody, setPostBody] = useState('');
   const [posting, setPosting] = useState(false);
   const [notifPref, setNotifPref] = useState<NotifPref>('all');
@@ -184,7 +185,7 @@ export default function ChatScreen() {
   const directFamilies = families.filter(f => connectedIds.has(f.id));
   // Households you've messaged before but aren't connected to anymore —
   // history stays reachable (read-only) instead of just vanishing.
-  const pastConversations = families.filter(f => !connectedIds.has(f.id) && dmHistoryIds.has(f.id));
+  const pastConversations = families.filter(f => !connectedIds.has(f.id) && dmHistoryIds.has(f.id) && !blockedIds.has(f.id));
   // Only people you're connected to are taggable — not the whole village.
   const mentionEntries = buildMentionEntries(directFamilies);
 
@@ -199,6 +200,7 @@ export default function ChatScreen() {
   useFocusEffect(useCallback(() => {
     loadPosts();
     loadMutes();
+    loadBlocked();
     loadFamilies();
     loadConnections();
     loadDmHistoryIds();
@@ -264,6 +266,17 @@ export default function ChatScreen() {
     setMutes(new Set((data ?? []).map((m: { muted_family_id: string }) => m.muted_family_id)));
   }
 
+  async function loadBlocked() {
+    if (!family) return;
+    const { data, error } = await supabase.from('blocks').select('blocked_id').eq('blocker_id', family.id);
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error('loadBlocked error', error);
+      return;
+    }
+    setBlockedIds(new Set((data ?? []).map((b: { blocked_id: string }) => b.blocked_id)));
+  }
+
   async function loadFamilies() {
     if (!family) return;
     // families_public covers everyone (name/animal only, no PII); families
@@ -306,7 +319,6 @@ export default function ChatScreen() {
     const { data, error } = await supabase
       .from('requests')
       .select('*')
-      .eq('status', 'open')
       .order('created_at', { ascending: false })
       .limit(200);
     if (error) {
@@ -547,7 +559,7 @@ export default function ChatScreen() {
     );
   };
 
-  const visiblePosts = posts.filter(p => !mutes.has(p.family_id));
+  const visiblePosts = posts.filter(p => !mutes.has(p.family_id) && !blockedIds.has(p.family_id));
   // Only count unread from households still connected — otherwise the
   // badge can promise a count you have no way to open (no row for a
   // disconnected household in the Direct list below).
@@ -627,7 +639,7 @@ export default function ChatScreen() {
             </View>
           )}
           {!activeTrigger && (
-            <Text style={styles.composerHint}>Type @ to tag someone, # to tag a request</Text>
+            <Text style={styles.composerHint}>Type @ to tag someone, # to tag a post</Text>
           )}
           <View style={styles.inputRow}>
             <TextInput

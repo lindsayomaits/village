@@ -67,7 +67,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="requests"
         options={{
-          tabBarLabel: 'Requests',
+          tabBarLabel: 'Posts',
           tabBarIcon: ({ focused }) => tabIcon(focused, 'calendar-outline', 'calendar'),
           tabBarBadge: pendingApprovals > 0 ? pendingApprovals : undefined,
           tabBarBadgeStyle: styles.badge,

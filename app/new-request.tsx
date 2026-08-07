@@ -379,6 +379,7 @@ export default function NewRequestScreen() {
             >
               <Text style={styles.postTypeEmoji}>📋</Text>
               <Text style={[styles.postTypeLabel, !isOffering && styles.postTypeLabelActiveRequest]}>I need help</Text>
+              <Text style={[styles.postTypeSubLabel, !isOffering && styles.postTypeLabelActiveRequest]}>Post a Request</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.postTypeBtn, isOffering && styles.postTypeBtnActiveOffer]}
@@ -386,6 +387,7 @@ export default function NewRequestScreen() {
             >
               <Text style={styles.postTypeEmoji}>🙋</Text>
               <Text style={[styles.postTypeLabel, isOffering && styles.postTypeLabelActiveOffer]}>I can help</Text>
+              <Text style={[styles.postTypeSubLabel, isOffering && styles.postTypeLabelActiveOffer]}>Post an Offer</Text>
             </TouchableOpacity>
           </View>
 
@@ -986,6 +988,7 @@ const styles = StyleSheet.create({
   postTypeBtnActiveOffer:   { borderColor: colors.green,   backgroundColor: colors.greenLight },
   postTypeEmoji: { fontSize: 22, marginBottom: 4 },
   postTypeLabel: { fontSize: 14, fontWeight: '700', color: colors.textSecondary },
+  postTypeSubLabel: { fontSize: 11, fontWeight: '500', color: colors.textMuted, marginTop: 1 },
   postTypeLabelActiveRequest: { color: colors.primaryDark },
   postTypeLabelActiveOffer:   { color: '#059669' },
 

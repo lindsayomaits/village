@@ -170,13 +170,13 @@ export default function RequestsScreen() {
 
   async function declineOffer(req: Request) {
     if (!family) return;
-    Alert.alert('Decline this offer?', 'The request goes back to open.', [
+    Alert.alert('Decline this offer?', 'The request goes back to available.', [
       { text: 'Keep it', style: 'cancel' },
       {
         text: 'Decline', style: 'destructive', onPress: async () => {
           const { error } = await supabase.rpc('retract_offer', { p_request_id: req.id });
           if (error) return Alert.alert('Error', error.message);
-          if (req.fulfilling_family_id) await notifyFamily(req.fulfilling_family_id, '❌ Offer declined', `${family.name} passed on your offer — the request is back open`);
+          if (req.fulfilling_family_id) await notifyFamily(req.fulfilling_family_id, '❌ Offer declined', `${family.name} passed on your offer — the request is back available`);
           await loadRequests();
         },
       },
@@ -184,7 +184,7 @@ export default function RequestsScreen() {
   }
 
   async function withdrawOffer(req: Request) {
-    Alert.alert('Withdraw your offer?', 'The request goes back to open.', [
+    Alert.alert('Withdraw your offer?', 'The request goes back to available.', [
       { text: 'Keep it', style: 'cancel' },
       { text: 'Withdraw', style: 'destructive', onPress: async () => {
         const { error } = await supabase.rpc('retract_offer', { p_request_id: req.id });
@@ -234,7 +234,7 @@ export default function RequestsScreen() {
   }
 
   async function withdrawClaim(req: Request) {
-    Alert.alert('Withdraw your claim?', 'The availability goes back to open.', [
+    Alert.alert('Withdraw your claim?', 'The availability goes back to available.', [
       { text: 'Keep it', style: 'cancel' },
       { text: 'Withdraw', style: 'destructive', onPress: async () => {
         const { error } = await supabase.rpc('retract_offer', { p_request_id: req.id });
@@ -251,7 +251,8 @@ export default function RequestsScreen() {
       { text: 'Not yet', style: 'cancel' },
       {
         text: 'Yes, done!', onPress: async () => {
-          await supabase.from('requests').update({ status: 'completed' }).eq('id', req.id);
+          const { error } = await supabase.from('requests').update({ status: 'completed' }).eq('id', req.id);
+          if (error) return Alert.alert('Error', error.message);
           await notifyConnections(family?.id ?? '', '🎉 Completed!', `${req.fulfilling_family?.name} helped ${req.requesting_family?.name}`);
           loadRequests();
         },
@@ -284,7 +285,7 @@ export default function RequestsScreen() {
           const { error } = await supabase.rpc('cancel_accepted_request', { p_request_id: req.id, p_family_id: family.id });
           if (error) return Alert.alert('Error', error.message);
           const other = isOwn ? req.fulfilling_family_id : req.requesting_family_id;
-          if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is open again`);
+          if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`);
           await Promise.all([loadRequests(), refreshFamily()]);
         },
       },
@@ -299,9 +300,9 @@ export default function RequestsScreen() {
 
   function statusBadge(status: Request['status']) {
     const map: Record<string, { bg: string; text: string; label: string }> = {
-      open:      { bg: colors.greenLight,  text: '#059669',    label: 'Open' },
-      offered:   { bg: colors.amberLight,  text: colors.amber, label: postType === 'offering' ? 'Claim pending' : 'Offer pending' },
-      accepted:  { bg: colors.blueLight,   text: colors.blue,  label: 'Confirmed' },
+      open:      { bg: colors.greenLight,  text: '#059669',    label: 'Available' },
+      offered:   { bg: colors.amberLight,  text: colors.amber, label: 'Pending' },
+      accepted:  { bg: colors.blueLight,   text: colors.blue,  label: 'Accepted' },
       completed: { bg: colors.purpleLight, text: colors.purple, label: 'Completed' },
       cancelled: { bg: colors.redLight,    text: colors.red,   label: 'Cancelled' },
     };
@@ -543,27 +544,27 @@ export default function RequestsScreen() {
   };
 
   const statusFilters: { key: Filter; label: string }[] = [
-    { key: 'open',     label: postType === 'offering' ? 'Available' : 'Open Requests' },
+    { key: 'open',     label: postType === 'offering' ? 'Village Offers' : 'Village Requests' },
     { key: 'mine',     label: postType === 'offering' ? 'My Offers' : 'My Requests' },
-    { key: 'upcoming', label: 'Upcoming' },
+    { key: 'upcoming', label: postType === 'offering' ? 'My Scheduled Offers' : 'My Scheduled Requests' },
   ];
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>Requests</Text>
+        <Text style={styles.title}>Posts</Text>
         <TouchableOpacity style={styles.newBtn} onPress={() => router.push('/new-request')}>
-          <Text style={styles.newBtnText}>+ New</Text>
+          <Text style={styles.newBtnText}>+ New Post</Text>
         </TouchableOpacity>
       </View>
 
       {/* Post type toggle */}
       <View style={styles.postTypeRow}>
         <TouchableOpacity style={[styles.postTypeBtn, postType === 'request' && styles.postTypeBtnActive]} onPress={() => switchPostType('request')}>
-          <Text style={[styles.postTypeText, postType === 'request' && styles.postTypeTextActive]}>I need help</Text>
+          <Text style={[styles.postTypeText, postType === 'request' && styles.postTypeTextActive]}>Requests</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.postTypeBtn, postType === 'offering' && styles.postTypeBtnActiveGreen]} onPress={() => switchPostType('offering')}>
-          <Text style={[styles.postTypeText, postType === 'offering' && styles.postTypeTextActiveGreen]}>I can help</Text>
+          <Text style={[styles.postTypeText, postType === 'offering' && styles.postTypeTextActiveGreen]}>Offers</Text>
         </TouchableOpacity>
       </View>
 
@@ -581,11 +582,18 @@ export default function RequestsScreen() {
 
       {/* Status filter */}
       <View style={styles.filtersRow}>
-        {statusFilters.map((f) => (
-          <TouchableOpacity key={f.key} style={[styles.filterTab, filter === f.key && styles.filterTabActive]} onPress={() => { setFilter(f.key); setLoading(true); }}>
-            <Text style={[styles.filterText, filter === f.key && styles.filterTextActive]}>{f.label}</Text>
-          </TouchableOpacity>
-        ))}
+        {statusFilters.map((f) => {
+          const words = f.label.split(' ');
+          return (
+            <TouchableOpacity key={f.key} style={[styles.filterTab, filter === f.key && styles.filterTabActive]} onPress={() => { setFilter(f.key); setLoading(true); }}>
+              {words.length > 1 ? words.map((w, i) => (
+                <Text key={i} style={[styles.filterText, filter === f.key && styles.filterTextActive]}>{w}</Text>
+              )) : (
+                <Text style={[styles.filterText, filter === f.key && styles.filterTextActive]}>{f.label}</Text>
+              )}
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
       {loading ? (
@@ -601,7 +609,7 @@ export default function RequestsScreen() {
             <View style={styles.empty}>
               <Text style={styles.emptyIcon}>{filter === 'upcoming' ? '🗓️' : postType === 'offering' ? '🙋' : '📭'}</Text>
               <Text style={styles.emptyText}>
-                {filter === 'upcoming' ? 'Nothing upcoming yet'
+                {filter === 'upcoming' ? 'Nothing scheduled yet'
                   : postType === 'offering' ? 'No availability posted yet'
                   : 'No requests here yet'}
               </Text>
@@ -638,7 +646,7 @@ const styles = StyleSheet.create({
 
   // Status filter
   filtersRow: { flexDirection: 'row', paddingHorizontal: 20, gap: 8, marginBottom: 10, marginTop: 2 },
-  filterTab: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border },
+  filterTab: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 8, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border },
   filterTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   filterText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
   filterTextActive: { color: '#fff' },

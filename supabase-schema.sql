@@ -1145,6 +1145,232 @@ create policy "dm_insert" on direct_messages for insert to authenticated
   with check (from_family_id = current_family_id() and (are_connected(from_family_id, to_family_id) or is_admin()));
 
 -- ============================================================
+-- MIGRATION: One-week-out reminder for unanswered requests
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 40. If a request is still 'open' exactly a week before it's needed,
+--     nudge the requester — this has to run server-side (pg_cron), not
+--     from the app, since it must fire whether or not anyone has the
+--     app open that day. Uses pg_net to call Expo's push API directly
+--     from Postgres. If the create extension lines below fail with a
+--     permissions error, enable "pg_cron" and "pg_net" first via the
+--     Supabase dashboard: Database -> Extensions -> toggle both on,
+--     then re-run just this block.
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+alter table requests add column if not exists reminder_sent boolean not null default false;
+
+create or replace function send_request_reminders()
+returns void language plpgsql security definer as $$
+declare
+  v_messages jsonb := '[]'::jsonb;
+  r record;
+begin
+  for r in
+    select req.id, req.title, f.push_token, f.partner_push_token
+    from requests req
+    join families f on f.id = req.requesting_family_id
+    where req.post_type = 'request'
+      and req.status = 'open'
+      and req.reminder_sent = false
+      and req.date = (current_date + 7)
+  loop
+    if r.push_token like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', r.push_token,
+        'title', '⏰ Still looking for help',
+        'body', format('No one has accepted your request "%s" yet — it''s scheduled in a week. Consider sending a personal message or finding an alternative.', r.title),
+        'sound', 'default'
+      );
+    end if;
+    if r.partner_push_token like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', r.partner_push_token,
+        'title', '⏰ Still looking for help',
+        'body', format('No one has accepted your request "%s" yet — it''s scheduled in a week. Consider sending a personal message or finding an alternative.', r.title),
+        'sound', 'default'
+      );
+    end if;
+    update requests set reminder_sent = true where id = r.id;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+select cron.schedule('request-reminders-daily', '0 15 * * *', $$select send_request_reminders();$$);
+
+-- ============================================================
+-- MIGRATION: Report and block households
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 41. Blocking: one-way, only the blocker can see their own block list
+--     (the blocked household is never told). Enforced at the RLS layer
+--     on the actual interaction points — DMs and new connection
+--     requests — not just hidden in the UI.
+create table if not exists blocks (
+  id          uuid primary key default uuid_generate_v4(),
+  blocker_id  uuid not null references families(id) on delete cascade,
+  blocked_id  uuid not null references families(id) on delete cascade,
+  created_at  timestamptz not null default now(),
+  unique (blocker_id, blocked_id)
+);
+alter table blocks enable row level security;
+drop policy if exists "blocks_select" on blocks;
+drop policy if exists "blocks_insert" on blocks;
+drop policy if exists "blocks_delete" on blocks;
+create policy "blocks_select" on blocks for select to authenticated using (blocker_id = current_family_id());
+create policy "blocks_insert" on blocks for insert to authenticated with check (blocker_id = current_family_id());
+create policy "blocks_delete" on blocks for delete to authenticated using (blocker_id = current_family_id());
+
+create or replace function is_blocked(a uuid, b uuid)
+returns boolean language sql stable security definer as $$
+  select exists (
+    select 1 from blocks
+    where (blocker_id = a and blocked_id = b) or (blocker_id = b and blocked_id = a)
+  );
+$$;
+
+-- 42. Blocking a household also removes any existing connection and
+--     cancels any pending request either direction, so it actually
+--     severs contact rather than just adding a label.
+create or replace function block_household(p_blocked_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_me uuid;
+begin
+  v_me := current_family_id();
+  if v_me is null then raise exception 'Not authenticated'; end if;
+  if p_blocked_id = v_me then raise exception 'Cannot block yourself'; end if;
+
+  insert into blocks (blocker_id, blocked_id) values (v_me, p_blocked_id)
+    on conflict (blocker_id, blocked_id) do nothing;
+
+  delete from connections
+    where (requester_id = v_me and recipient_id = p_blocked_id)
+       or (requester_id = p_blocked_id and recipient_id = v_me);
+end;
+$$;
+
+-- 43. Stop blocked households from reaching each other via DM or a new
+--     connection request. Existing are_connected()-gated checks stay;
+--     this adds the block check alongside them.
+drop policy if exists "dm_insert" on direct_messages;
+create policy "dm_insert" on direct_messages for insert to authenticated
+  with check (
+    from_family_id = current_family_id()
+    and (are_connected(from_family_id, to_family_id) or is_admin())
+    and not is_blocked(from_family_id, to_family_id)
+  );
+
+drop policy if exists "connections_insert" on connections;
+create policy "connections_insert" on connections for insert to authenticated
+  with check (requester_id = current_family_id() and not is_blocked(requester_id, recipient_id));
+
+-- 44. connect_by_code should also refuse to connect blocked households.
+create or replace function connect_by_code(p_code text)
+returns table(id uuid, name text, animal text) language plpgsql security definer as $$
+declare
+  v_me             uuid;
+  v_target         families%rowtype;
+  v_recent_attempts int;
+begin
+  v_me := current_family_id();
+  if v_me is null then raise exception 'Not authenticated'; end if;
+
+  select count(*) into v_recent_attempts
+    from connect_code_attempts
+    where family_id = v_me and attempted_at > now() - interval '15 minutes';
+  if v_recent_attempts >= 10 then
+    raise exception 'Too many attempts. Please wait a few minutes and try again.';
+  end if;
+
+  insert into connect_code_attempts (family_id) values (v_me);
+
+  select * into v_target from families
+    where connect_code = upper(trim(p_code)) and is_active;
+  if not found then raise exception 'Invalid code'; end if;
+  if v_target.id = v_me then raise exception 'That is your own code'; end if;
+  if is_blocked(v_me, v_target.id) then raise exception 'Invalid code'; end if;
+
+  if exists (
+    select 1 from connections
+    where (requester_id = v_me and recipient_id = v_target.id)
+       or (requester_id = v_target.id and recipient_id = v_me)
+  ) then
+    update connections set status = 'accepted'
+      where (requester_id = v_me and recipient_id = v_target.id)
+         or (requester_id = v_target.id and recipient_id = v_me);
+  else
+    insert into connections (requester_id, recipient_id, status)
+      values (v_me, v_target.id, 'accepted');
+  end if;
+
+  return query select v_target.id, v_target.name, v_target.animal;
+end;
+$$;
+
+-- 45. Reports: reporter and admins can see them; only admins can
+--     update status (mark reviewed/dismissed).
+create table if not exists reports (
+  id           uuid primary key default uuid_generate_v4(),
+  reporter_id  uuid not null references families(id) on delete cascade,
+  reported_id  uuid not null references families(id) on delete cascade,
+  reason       text not null,
+  note         text,
+  status       text not null default 'open' check (status in ('open', 'reviewed', 'dismissed')),
+  created_at   timestamptz not null default now()
+);
+alter table reports enable row level security;
+drop policy if exists "reports_select" on reports;
+drop policy if exists "reports_insert" on reports;
+drop policy if exists "reports_update" on reports;
+create policy "reports_select" on reports for select to authenticated using (reporter_id = current_family_id() or is_admin());
+create policy "reports_insert" on reports for insert to authenticated with check (reporter_id = current_family_id());
+create policy "reports_update" on reports for update to authenticated using (is_admin());
+
+-- ============================================================
+-- MIGRATION: Let the helper mark a request completed too
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 46. "Mark as Completed" shows for both the requester and the helper
+--     (requests.tsx), but requests_update only ever allowed the
+--     requester — the helper's tap silently failed at the database
+--     while the app went on to notify everyone it worked. Extends
+--     update rights to the fulfiller too, same trust model already
+--     granted to the requester (whole-row RLS, client sends only the
+--     fields it means to change).
+drop policy if exists "requests_update" on requests;
+create policy "requests_update" on requests for update to authenticated
+  using (requesting_family_id = current_family_id() or fulfilling_family_id = current_family_id() or is_admin());
+
+-- ============================================================
+-- MIGRATION: Push tokens for admin notifications
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 47. A report's reporter usually isn't connected to (or admin
+--     themselves) the admin household, so a plain `families` select for
+--     admin push tokens would come back empty under RLS. Security
+--     definer so it always resolves, regardless of who's asking —
+--     returns only push tokens, nothing else.
+create or replace function get_admin_push_tokens()
+returns table(push_token text, partner_push_token text)
+language sql stable security definer as $$
+  select push_token, partner_push_token from families where is_admin and is_active;
+$$;
+
+-- ============================================================
 -- SEED: create the admin household
 -- After running this schema, sign up via the app with:
 --   email: lindsayomaits@gmail.com

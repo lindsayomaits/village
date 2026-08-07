@@ -118,6 +118,26 @@ export type Connection = {
   created_at: string;
 };
 
+export type Block = {
+  id: string;
+  blocker_id: string;
+  blocked_id: string;
+  blocked?: Family;
+  created_at: string;
+};
+
+export type Report = {
+  id: string;
+  reporter_id: string;
+  reporter?: Family;
+  reported_id: string;
+  reported?: Family;
+  reason: string;
+  note: string | null;
+  status: 'open' | 'reviewed' | 'dismissed';
+  created_at: string;
+};
+
 export type Invite = {
   id: string;
   code: string;

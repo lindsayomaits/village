@@ -14,17 +14,21 @@ import type { Request, RequestCategory } from '../types';
 const DURATION_OPTIONS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8];
 
 const CATEGORIES: { key: RequestCategory; emoji: string; label: string; sub: string }[] = [
-  { key: 'kid_sit',      emoji: '👧', label: 'Kid-sitting',      sub: 'Watching kids at home' },
-  { key: 'dog',          emoji: '🐾', label: 'Pet care',          sub: 'Walking, boarding, or checking in on pets' },
-  { key: 'manual_labor', emoji: '🔨', label: 'Manual labor',      sub: 'Garden, painting, moving, etc. · 2× rate' },
-  { key: 'professional', emoji: '🎓', label: 'Professional help', sub: 'Counseling, legal, tech, finance, and more' },
-  { key: 'cooking',      emoji: '🍳', label: 'Cooking / baking',  sub: 'Meal prep, baking, recipe help, and more' },
+  { key: 'kid_sit',           emoji: '👧', label: 'Kid-sitting',      sub: 'Watching kids at home' },
+  { key: 'dog',               emoji: '🐾', label: 'Pet care',          sub: 'Walking, boarding, or checking in on pets' },
+  { key: 'manual_labor',      emoji: '🔨', label: 'Manual labor',      sub: 'Garden, painting, moving, etc. · 2× rate' },
+  { key: 'professional',      emoji: '🎓', label: 'Professional help', sub: 'Counseling, legal, tech, finance, and more' },
+  { key: 'cooking',           emoji: '🍳', label: 'Cooking / baking',  sub: 'Meal prep, baking, recipe help, and more' },
+  { key: 'elder_care',        emoji: '🤝', label: 'Elder care',        sub: 'Companionship, errands, or assistance' },
+  { key: 'physical_training', emoji: '🏃', label: 'Physical training', sub: 'Running, yoga, weights, and more' },
+  { key: 'errands',           emoji: '🛒', label: 'Errands',           sub: 'Groceries, transport, pick-ups, and more' },
 ];
 
 const PROFESSIONAL_SERVICES = [
   { key: 'counseling', label: '💆 Counseling' },
   { key: 'legal',      label: '⚖️ Legal advice' },
   { key: 'computer',   label: '💻 Tech / computer help' },
+  { key: 'sewing',     label: '🧵 Sewing / alterations' },
   { key: 'financial',  label: '💰 Financial / tax advice' },
   { key: 'medical',    label: '🏥 Health advice' },
   { key: 'career',     label: '📋 Career coaching' },
@@ -41,6 +45,38 @@ const COOKING_TYPES = [
   { key: 'desserts',  label: '🧁 Desserts' },
   { key: 'healthy',   label: '🥗 Healthy meals' },
   { key: 'other',     label: '✏️ Other' },
+];
+
+const ELDER_CARE_TYPES = [
+  { key: 'companionship', label: '🫂 Companionship / visits' },
+  { key: 'errands',       label: '🛒 Errands & shopping' },
+  { key: 'transport',     label: '🚗 Transportation' },
+  { key: 'meals',         label: '🍲 Meal delivery / prep' },
+  { key: 'tech_help',     label: '💻 Tech help' },
+  { key: 'medical',       label: '💊 Medication reminders' },
+  { key: 'other',         label: '✏️ Other' },
+];
+
+const TRAINING_TYPES = [
+  { key: 'running',  label: '🏃 Running / jogging' },
+  { key: 'yoga',     label: '🧘 Yoga' },
+  { key: 'weights',  label: '🏋️ Weight training' },
+  { key: 'walking',  label: '🚶 Walking' },
+  { key: 'cycling',  label: '🚴 Cycling' },
+  { key: 'swimming', label: '🏊 Swimming' },
+  { key: 'pilates',  label: '🤸 Pilates / stretching' },
+  { key: 'other',    label: '✏️ Other' },
+];
+
+const ERRAND_TYPES = [
+  { key: 'groceries',  label: '🛒 Grocery pick-up' },
+  { key: 'transport',  label: '🚗 Transport / drive' },
+  { key: 'pharmacy',   label: '💊 Pharmacy run' },
+  { key: 'post',       label: '📮 Post office / mail' },
+  { key: 'pickup',     label: '📦 Pick up a package / item' },
+  { key: 'dropoff',    label: '🏠 Drop something off' },
+  { key: 'airport',    label: '🛫 Airport transportation' },
+  { key: 'other',      label: '✏️ Other' },
 ];
 
 function toDateOnly(d: Date) {
@@ -114,6 +150,18 @@ export default function EditRequestScreen() {
   const [cookingType, setCookingType] = useState('');
   const [cookingOther, setCookingOther] = useState('');
 
+  // elder care
+  const [elderCareType, setElderCareType] = useState('');
+  const [elderCareOther, setElderCareOther] = useState('');
+
+  // physical training
+  const [trainingType, setTrainingType] = useState('');
+  const [trainingOther, setTrainingOther] = useState('');
+
+  // errands
+  const [errandType, setErrandType] = useState('');
+  const [errandOther, setErrandOther] = useState('');
+
   // timing flexible
   const [timingFlexible, setTimingFlexible] = useState(false);
 
@@ -177,6 +225,27 @@ export default function EditRequestScreen() {
         else { setCookingType('other'); setCookingOther(d.cooking_type ?? ''); }
         setTimingFlexible(d.timing_flexible ?? false);
       }
+      if (req.category === 'elder_care' && req.category_details) {
+        const d = req.category_details as { elder_care_type: string; timing_flexible?: boolean };
+        const knownType = ELDER_CARE_TYPES.find(s => s.label === d.elder_care_type);
+        if (knownType) { setElderCareType(knownType.key); }
+        else { setElderCareType('other'); setElderCareOther(d.elder_care_type ?? ''); }
+        setTimingFlexible(d.timing_flexible ?? false);
+      }
+      if (req.category === 'physical_training' && req.category_details) {
+        const d = req.category_details as { training_type: string; timing_flexible?: boolean };
+        const knownType = TRAINING_TYPES.find(s => s.label === d.training_type);
+        if (knownType) { setTrainingType(knownType.key); }
+        else { setTrainingType('other'); setTrainingOther(d.training_type ?? ''); }
+        setTimingFlexible(d.timing_flexible ?? false);
+      }
+      if (req.category === 'errands' && req.category_details) {
+        const d = req.category_details as { errand_type: string; timing_flexible?: boolean };
+        const knownType = ERRAND_TYPES.find(s => s.label === d.errand_type);
+        if (knownType) { setErrandType(knownType.key); }
+        else { setErrandType('other'); setErrandOther(d.errand_type ?? ''); }
+        setTimingFlexible(d.timing_flexible ?? false);
+      }
 
       if (req.is_overnight) {
         setDropoffDate(parseDateStr(req.date));
@@ -214,6 +283,12 @@ export default function EditRequestScreen() {
     if (category === 'professional' && serviceType === 'other' && !serviceOther.trim()) return Alert.alert('Please describe the service');
     if (category === 'cooking' && !cookingType) return Alert.alert('Please select a cooking type');
     if (category === 'cooking' && cookingType === 'other' && !cookingOther.trim()) return Alert.alert('Please describe the cooking help');
+    if (category === 'elder_care' && !elderCareType) return Alert.alert('Please select an elder care type');
+    if (category === 'elder_care' && elderCareType === 'other' && !elderCareOther.trim()) return Alert.alert('Please describe the elder care help');
+    if (category === 'physical_training' && !trainingType) return Alert.alert('Please select a training type');
+    if (category === 'physical_training' && trainingType === 'other' && !trainingOther.trim()) return Alert.alert('Please describe the training');
+    if (category === 'errands' && !errandType) return Alert.alert('Please select an errand type');
+    if (category === 'errands' && errandType === 'other' && !errandOther.trim()) return Alert.alert('Please describe the errand');
     if (category === 'kid_sit' && isOvernight && overnight.actualHours <= 0) {
       return Alert.alert('Invalid times', 'Pickup must be after drop-off.');
     }
@@ -226,12 +301,27 @@ export default function EditRequestScreen() {
       ? cookingOther.trim()
       : COOKING_TYPES.find(s => s.key === cookingType)?.label ?? cookingType;
 
+    const resolvedElderCare = elderCareType === 'other'
+      ? elderCareOther.trim()
+      : ELDER_CARE_TYPES.find(s => s.key === elderCareType)?.label ?? elderCareType;
+
+    const resolvedTraining = trainingType === 'other'
+      ? trainingOther.trim()
+      : TRAINING_TYPES.find(s => s.key === trainingType)?.label ?? trainingType;
+
+    const resolvedErrand = errandType === 'other'
+      ? errandOther.trim()
+      : ERRAND_TYPES.find(s => s.key === errandType)?.label ?? errandType;
+
     const categoryDetails =
       category === 'kid_sit'      ? { location: kidLocation! }
       : category === 'dog'        ? { pet_name: petName.trim(), dog_task: dogTask }
       : category === 'manual_labor' ? { labor_description: laborDescription.trim(), actual_hours: duration, timing_flexible: timingFlexible || undefined }
       : category === 'professional' ? { service_type: resolvedService, timing_flexible: timingFlexible || undefined }
       : category === 'cooking'      ? { cooking_type: resolvedCooking, timing_flexible: timingFlexible || undefined }
+      : category === 'elder_care'      ? { elder_care_type: resolvedElderCare, timing_flexible: timingFlexible || undefined }
+      : category === 'physical_training' ? { training_type: resolvedTraining, timing_flexible: timingFlexible || undefined }
+      : category === 'errands'         ? { errand_type: resolvedErrand, timing_flexible: timingFlexible || undefined }
       : null;
 
     setSaving(true);
@@ -451,8 +541,77 @@ export default function EditRequestScreen() {
             </>
           )}
 
+          {/* Elder care specific */}
+          {category === 'elder_care' && (
+            <>
+              <Text style={styles.label}>Type of help <Text style={styles.required}>*</Text></Text>
+              <View style={styles.serviceGrid}>
+                {ELDER_CARE_TYPES.map((s) => (
+                  <TouchableOpacity key={s.key}
+                    style={[styles.serviceChip, elderCareType === s.key && styles.serviceChipActiveSage]}
+                    onPress={() => setElderCareType(s.key)}>
+                    <Text style={[styles.serviceChipText, elderCareType === s.key && styles.serviceChipTextSage]}>{s.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {elderCareType === 'other' && (
+                <>
+                  <Text style={styles.label}>Describe <Text style={styles.required}>*</Text></Text>
+                  <TextInput style={styles.input} placeholder="e.g. Weekly check-in visits..."
+                    placeholderTextColor={colors.textMuted} value={elderCareOther} onChangeText={setElderCareOther} />
+                </>
+              )}
+            </>
+          )}
+
+          {/* Physical training specific */}
+          {category === 'physical_training' && (
+            <>
+              <Text style={styles.label}>Type of training <Text style={styles.required}>*</Text></Text>
+              <View style={styles.serviceGrid}>
+                {TRAINING_TYPES.map((s) => (
+                  <TouchableOpacity key={s.key}
+                    style={[styles.serviceChip, trainingType === s.key && styles.serviceChipActiveSage]}
+                    onPress={() => setTrainingType(s.key)}>
+                    <Text style={[styles.serviceChipText, trainingType === s.key && styles.serviceChipTextSage]}>{s.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {trainingType === 'other' && (
+                <>
+                  <Text style={styles.label}>Describe <Text style={styles.required}>*</Text></Text>
+                  <TextInput style={styles.input} placeholder="e.g. HIIT circuit training..."
+                    placeholderTextColor={colors.textMuted} value={trainingOther} onChangeText={setTrainingOther} />
+                </>
+              )}
+            </>
+          )}
+
+          {/* Errands specific */}
+          {category === 'errands' && (
+            <>
+              <Text style={styles.label}>Type of errand <Text style={styles.required}>*</Text></Text>
+              <View style={styles.serviceGrid}>
+                {ERRAND_TYPES.map((s) => (
+                  <TouchableOpacity key={s.key}
+                    style={[styles.serviceChip, errandType === s.key && styles.serviceChipActiveSage]}
+                    onPress={() => setErrandType(s.key)}>
+                    <Text style={[styles.serviceChipText, errandType === s.key && styles.serviceChipTextSage]}>{s.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {errandType === 'other' && (
+                <>
+                  <Text style={styles.label}>Describe <Text style={styles.required}>*</Text></Text>
+                  <TextInput style={styles.input} placeholder="e.g. Return a package at UPS..."
+                    placeholderTextColor={colors.textMuted} value={errandOther} onChangeText={setErrandOther} />
+                </>
+              )}
+            </>
+          )}
+
           {/* Timing flexible toggle (manual_labor, professional, cooking) */}
-          {(category === 'manual_labor' || category === 'professional' || category === 'cooking') && (
+          {(category === 'manual_labor' || category === 'professional' || category === 'cooking' || category === 'elder_care' || category === 'physical_training' || category === 'errands') && (
             <View style={styles.flexibleRow}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.flexibleLabel}>⏰ Timing flexible</Text>

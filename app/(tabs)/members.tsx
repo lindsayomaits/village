@@ -11,7 +11,7 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import { formatPhone, renderKidsInfo, displayKidsData } from '../../lib/utils';
-import { notifyFamily } from '../../lib/notifications';
+import { notifyFamily, notifyAdmins } from '../../lib/notifications';
 import type { Family, Connection } from '../../types';
 
 const GIFT_HOUR_OPTIONS = [0.5, 1, 2, 3, 4, 5, 8, 10];
@@ -43,6 +43,11 @@ export default function MembersScreen() {
   const [actionLoading, setActionLoading] = useState(false);
   const [connectCode, setConnectCode] = useState('');
   const [connectingByCode, setConnectingByCode] = useState(false);
+  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
+  const [reportTarget, setReportTarget] = useState<Family | null>(null);
+  const [reportReason, setReportReason] = useState<string | null>(null);
+  const [reportNote, setReportNote] = useState('');
+  const [reportSubmitting, setReportSubmitting] = useState(false);
 
   // Gift hours state
   const [giftTarget, setGiftTarget] = useState<Family | null>(null);
@@ -55,16 +60,62 @@ export default function MembersScreen() {
     // browsing/discovery works network-wide; families only returns full
     // rows (parent/phone/kids info) for self, admin, or connected
     // households — merge, preferring the richer row where RLS allows it.
-    const [fullRes, publicRes, connectionsRes] = await Promise.all([
+    const [fullRes, publicRes, connectionsRes, blocksRes] = await Promise.all([
       supabase.from('families').select('*'),
       supabase.from('families_public').select('*'),
       supabase.from('connections').select('*').or(`requester_id.eq.${myHousehold?.id},recipient_id.eq.${myHousehold?.id}`),
+      supabase.from('blocks').select('blocked_id').eq('blocker_id', myHousehold?.id ?? ''),
     ]);
     const fullById = new Map((fullRes.data ?? []).map((f: Family) => [f.id, f]));
     const merged = (publicRes.data ?? []).map((p: Family) => fullById.get(p.id) ?? p);
     setAllHouseholds(merged as Family[]);
     setConnections((connectionsRes.data ?? []) as Connection[]);
+    setBlockedIds(new Set((blocksRes.data ?? []).map((b: { blocked_id: string }) => b.blocked_id)));
     setLoading(false);
+  }
+
+  async function blockHousehold(target: Family) {
+    Alert.alert(
+      `Block ${target.name}?`,
+      'They’ll be disconnected and won’t be able to message you, connect with you, or find you again. This can be undone later in Profile.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block', style: 'destructive',
+          onPress: async () => {
+            setActionLoading(true);
+            const { error } = await supabase.rpc('block_household', { p_blocked_id: target.id });
+            setActionLoading(false);
+            if (error) return Alert.alert('Error', error.message);
+            setSelected(null);
+            await loadData();
+          },
+        },
+      ]
+    );
+  }
+
+  function openReportModal(target: Family) {
+    setSelected(null);
+    setReportReason(null);
+    setReportNote('');
+    setReportTarget(target);
+  }
+
+  async function submitReport() {
+    if (!myHousehold || !reportTarget || !reportReason) return;
+    setReportSubmitting(true);
+    const { error } = await supabase.from('reports').insert({
+      reporter_id: myHousehold.id,
+      reported_id: reportTarget.id,
+      reason: reportReason,
+      note: reportNote.trim() || null,
+    });
+    setReportSubmitting(false);
+    if (error) return Alert.alert('Error', error.message);
+    notifyAdmins('🚩 New report', `${myHousehold.name} reported ${reportTarget.name} — ${reportReason}`).catch(() => {});
+    setReportTarget(null);
+    Alert.alert('Report submitted', 'Thanks for letting us know — an admin will review this.');
   }
 
   useEffect(() => {
@@ -226,6 +277,7 @@ export default function MembersScreen() {
     if (h.id === myHousehold?.id) return false;
     if (connectedIds.includes(h.id)) return false;
     if (h.discoverable === false) return false;
+    if (blockedIds.has(h.id)) return false;
     if (!h.name.toLowerCase().includes(searchLower)) return false;
     return true;
   });
@@ -323,7 +375,7 @@ export default function MembersScreen() {
           onPress={() => setTab('pending')}
         >
           <Text style={[styles.tabText, tab === 'pending' && styles.tabTextActive]}>
-            Requests{pendingHouseholds.length > 0 ? ` (${pendingHouseholds.length})` : ''}
+            Invites{pendingHouseholds.length > 0 ? ` (${pendingHouseholds.length})` : ''}
           </Text>
           {pendingHouseholds.length > 0 && <View style={styles.tabDot} />}
         </TouchableOpacity>
@@ -484,7 +536,7 @@ export default function MembersScreen() {
 
                 {status !== 'connected' && selected.id !== myHousehold?.id &&
                   !selected.parent1_name && !selected.parent2_name && !selected.kids_info && !selected.kids_data?.length && (
-                  <Text style={styles.connectHint}>Connect with this household to see contact info and kids.</Text>
+                  <Text style={styles.connectHint}>Connect with this household to see contact info.</Text>
                 )}
 
                 {selected.services_offered && selected.services_offered.length > 0 && (
@@ -569,6 +621,18 @@ export default function MembersScreen() {
                   </View>
                 )}
 
+                {selected.id !== myHousehold?.id && (
+                  <View style={styles.safetyRow}>
+                    <TouchableOpacity onPress={() => openReportModal(selected)}>
+                      <Text style={styles.safetyLinkText}>Report</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.safetyDivider}>·</Text>
+                    <TouchableOpacity onPress={() => blockHousehold(selected)} disabled={actionLoading}>
+                      <Text style={styles.safetyLinkText}>Block</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
                 <TouchableOpacity style={styles.closeBtn} onPress={() => setSelected(null)}>
                   <Text style={styles.closeBtnText}>Close</Text>
                 </TouchableOpacity>
@@ -635,6 +699,59 @@ export default function MembersScreen() {
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.closeBtn} onPress={() => setGiftTarget(null)}>
+                <Text style={styles.closeBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
+
+      <Modal
+        visible={!!reportTarget}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setReportTarget(null)}
+      >
+        <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={() => setReportTarget(null)} />
+        <View style={styles.sheet}>
+          <View style={styles.sheetHandle} />
+          {reportTarget && (
+            <ScrollView bounces={false} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">
+              <Text style={styles.giftTitle}>Report {reportTarget.name}</Text>
+              <Text style={styles.giftSub}>This goes to an admin for review, not to {reportTarget.name}.</Text>
+
+              <Text style={styles.giftLabel}>Reason</Text>
+              {['Inappropriate behavior', 'Safety concern', 'Spam', 'Other'].map(r => (
+                <TouchableOpacity
+                  key={r}
+                  style={[styles.reportReasonRow, reportReason === r && styles.reportReasonRowActive]}
+                  onPress={() => setReportReason(r)}
+                >
+                  <View style={[styles.radio, reportReason === r && styles.radioActive]} />
+                  <Text style={styles.reportReasonText}>{r}</Text>
+                </TouchableOpacity>
+              ))}
+
+              <Text style={styles.giftLabel}>Details (optional)</Text>
+              <TextInput
+                style={styles.giftNoteInput}
+                placeholder="Anything else the admin should know"
+                placeholderTextColor={colors.textMuted}
+                value={reportNote}
+                onChangeText={setReportNote}
+                multiline
+                numberOfLines={3}
+              />
+
+              <TouchableOpacity
+                style={[styles.giftSubmitBtn, (!reportReason || reportSubmitting) && { opacity: 0.6 }]}
+                onPress={submitReport}
+                disabled={!reportReason || reportSubmitting}
+              >
+                <Text style={styles.giftSubmitText}>{reportSubmitting ? 'Submitting...' : 'Submit Report'}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.closeBtn} onPress={() => setReportTarget(null)}>
                 <Text style={styles.closeBtnText}>Cancel</Text>
               </TouchableOpacity>
             </ScrollView>
@@ -774,6 +891,18 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: colors.border, marginTop: 4,
   },
   disconnectBtnText: { fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
+
+  safetyRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 14 },
+  safetyLinkText: { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
+  safetyDivider: { fontSize: 13, color: colors.textMuted },
+  reportReasonRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10,
+    paddingHorizontal: 12, borderRadius: 12, borderWidth: 1.5, borderColor: colors.borderLight, marginBottom: 8,
+  },
+  reportReasonRowActive: { borderColor: colors.primary, backgroundColor: colors.primaryLight },
+  radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.border },
+  radioActive: { borderColor: colors.primary, backgroundColor: colors.primary },
+  reportReasonText: { fontSize: 14, color: colors.text, fontWeight: '600' },
 
   closeBtn: { marginTop: 10, borderRadius: 16, paddingVertical: 15, alignItems: 'center', width: '100%', borderWidth: 1.5, borderColor: colors.border },
   closeBtnText: { fontSize: 15, color: colors.textSecondary, fontWeight: '700' },

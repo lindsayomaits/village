@@ -9,12 +9,13 @@ import { useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
-import type { Family, Invite } from '../../types';
+import type { Family, Invite, Report } from '../../types';
 
 export default function AdminScreen() {
   const { family: adminFamily } = useAuth();
   const [families, setFamilies] = useState<Family[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
+  const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -25,13 +26,25 @@ export default function AdminScreen() {
   const [adjusting, setAdjusting] = useState(false);
 
   async function loadData() {
-    const [{ data: fams }, { data: invs }] = await Promise.all([
+    const [{ data: fams }, { data: invs }, { data: reps }] = await Promise.all([
       supabase.from('families').select('*').order('name'),
       supabase.from('invites').select('*').order('created_at', { ascending: false }).limit(10),
+      supabase.from('reports').select('*').eq('status', 'open').order('created_at', { ascending: false }),
     ]);
     setFamilies(fams ?? []);
     setInvites(invs ?? []);
+    setReports((reps ?? []) as Report[]);
     setLoading(false);
+  }
+
+  function familyName(id: string): string {
+    return families.find(f => f.id === id)?.name ?? 'Unknown household';
+  }
+
+  async function resolveReport(report: Report, status: 'reviewed' | 'dismissed') {
+    const { error } = await supabase.from('reports').update({ status }).eq('id', report.id);
+    if (error) return Alert.alert('Error', error.message);
+    setReports(prev => prev.filter(r => r.id !== report.id));
   }
 
   useFocusEffect(useCallback(() => { loadData(); }, []));
@@ -152,6 +165,30 @@ export default function AdminScreen() {
         )}
       </View>
 
+      {reports.length > 0 && (
+        <View style={styles.inviteSection}>
+          <Text style={styles.sectionLabel}>Open Reports ({reports.length})</Text>
+          {reports.map(r => (
+            <View key={r.id} style={styles.reportRow}>
+              <Text style={styles.reportText}>
+                <Text style={{ fontWeight: '800' }}>{familyName(r.reporter_id)}</Text> reported{' '}
+                <Text style={{ fontWeight: '800' }}>{familyName(r.reported_id)}</Text>
+              </Text>
+              <Text style={styles.reportReason}>{r.reason}</Text>
+              {r.note && <Text style={styles.reportNote}>"{r.note}"</Text>}
+              <View style={styles.reportActions}>
+                <TouchableOpacity style={styles.editBtn} onPress={() => resolveReport(r, 'reviewed')}>
+                  <Text style={styles.editBtnText}>Mark Reviewed</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.removeBtn} onPress={() => resolveReport(r, 'dismissed')}>
+                  <Text style={styles.removeBtnText}>Dismiss</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
+
       <Text style={[styles.sectionLabel, { paddingHorizontal: 20, marginBottom: 10 }]}>
         Households ({families.length})
       </Text>
@@ -223,6 +260,11 @@ const styles = StyleSheet.create({
   inviteRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 7 },
   inviteCode: { fontSize: 20, fontWeight: '800', letterSpacing: 3, color: colors.text },
   inviteStatus: { fontSize: 13, fontWeight: '700' },
+  reportRow: { paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.borderLight },
+  reportText: { fontSize: 14, color: colors.text },
+  reportReason: { fontSize: 13, color: colors.red, fontWeight: '700', marginTop: 2 },
+  reportNote: { fontSize: 13, color: colors.textMuted, fontStyle: 'italic', marginTop: 2 },
+  reportActions: { flexDirection: 'row', gap: 8, marginTop: 8 },
   list: { paddingHorizontal: 20, paddingBottom: 32 },
   card: {
     backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 10,

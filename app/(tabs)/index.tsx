@@ -13,6 +13,12 @@ import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import type { Request } from '../../types';
 
+function postStatusInfo(status: Request['status']): { label: string; color: string; bg: string } {
+  if (status === 'accepted' || status === 'completed') return { label: 'Accepted', color: colors.blue, bg: colors.blueLight };
+  if (status === 'offered') return { label: 'Pending', color: colors.amber, bg: colors.amberLight };
+  return { label: 'Available', color: '#059669', bg: colors.greenLight };
+}
+
 export default function HomeScreen() {
   const { family, signOut, refreshFamily } = useAuth();
   const router = useRouter();
@@ -62,7 +68,7 @@ export default function HomeScreen() {
           .from('requests')
           .select('*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*)')
           .or(`requesting_family_id.eq.${family.id},fulfilling_family_id.eq.${family.id}`)
-          .in('status', ['open', 'accepted'])
+          .in('status', ['open', 'offered', 'accepted'])
           .gte('date', today)
           .order('date', { ascending: true })
       : { data: [] };
@@ -85,7 +91,7 @@ export default function HomeScreen() {
   const balanceColor = balance < 0 ? colors.red : balance <= 3 ? colors.amber : '#fff';
 
   const myRequests = myItems.filter(r => r.requesting_family_id === family?.id);
-  const mySits = myItems.filter(r => r.fulfilling_family_id === family?.id);
+  const mySits = myItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'accepted');
 
   const isNewUser = !family?.parent1_name || !family?.parent1_phone;
 
@@ -181,10 +187,10 @@ export default function HomeScreen() {
         {/* Quick actions */}
         <View style={styles.actions}>
           <TouchableOpacity style={styles.actionPrimary} onPress={() => router.push('/(tabs)/requests')}>
-            <Text style={styles.actionPrimaryText}>Browse Requests</Text>
+            <Text style={styles.actionPrimaryText}>Browse Posts</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.actionSecondary} onPress={() => router.push('/new-request')}>
-            <Text style={styles.actionSecondaryText}>+ New Request</Text>
+            <Text style={styles.actionSecondaryText}>+ New Post</Text>
           </TouchableOpacity>
         </View>
 
@@ -235,15 +241,24 @@ export default function HomeScreen() {
                       onPress={() => router.push({ pathname: '/(tabs)/requests', params: { postType: r.post_type, filter: 'mine' } })}
                     >
                       <View style={styles.itemCardLeft}>
-                        <View style={[styles.postTypePill, { backgroundColor: isOffer ? colors.sage : colors.primary }]}>
-                          <Text style={styles.postTypePillText}>{isOffer ? 'I can help' : 'I need help'}</Text>
+                        <View style={styles.pillStack}>
+                          <View style={[styles.postTypePill, { backgroundColor: isOffer ? colors.green : colors.primary }]}>
+                            <Text style={styles.postTypePillText}>{isOffer ? 'My Offer' : 'My Request'}</Text>
+                          </View>
+                          <View style={[styles.postTypePill, { backgroundColor: postStatusInfo(r.status).bg }]}>
+                            <Text style={[styles.postTypePillText, { color: postStatusInfo(r.status).color }]}>{postStatusInfo(r.status).label}</Text>
+                          </View>
                         </View>
                         <View style={styles.itemInfo}>
                           <Text style={styles.itemTitle}>{r.title}</Text>
                           <Text style={styles.itemSub}>
                             {isOffer
-                              ? r.status === 'accepted' ? `Claimed by ${r.fulfilling_family?.name}` : 'Open for claims'
-                              : r.status === 'accepted' ? `${r.fulfilling_family?.name} is covering this` : 'Waiting for someone in your network'}
+                              ? r.status === 'accepted' ? `Claimed by ${r.fulfilling_family?.name}`
+                                : r.status === 'offered' ? `${r.fulfilling_family?.name} wants to claim this`
+                                : 'Available for anyone in your network to claim'
+                              : r.status === 'accepted' ? `${r.fulfilling_family?.name} is covering this`
+                                : r.status === 'offered' ? `${r.fulfilling_family?.name} offered to help`
+                                : 'Waiting for someone in your network'}
                           </Text>
                           <Text style={styles.itemDate}>
                             {isOffer
@@ -331,7 +346,8 @@ const styles = StyleSheet.create({
   itemCardAccepted: { borderColor: '#86EFAC' },
   itemCardOfferAccepted: { borderColor: colors.sage },
   itemCardLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  postTypePill: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, marginRight: 10, alignSelf: 'flex-start' },
+  pillStack: { gap: 4, marginRight: 10, alignItems: 'flex-start' },
+  postTypePill: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, alignSelf: 'flex-start' },
   postTypePillText: { fontSize: 10, fontWeight: '700', color: '#fff' },
   itemAnimal: { fontSize: 28, marginRight: 12 },
   itemStatusEmoji: { fontSize: 22, marginRight: 12 },
