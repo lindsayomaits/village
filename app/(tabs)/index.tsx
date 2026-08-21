@@ -1,8 +1,9 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, StyleSheet, ScrollView, TouchableOpacity, Image,
   RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -39,7 +40,24 @@ export default function HomeScreen() {
   const [pendingOutgoing, setPendingOutgoing] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [onboardingSeen, setOnboardingSeen] = useState(true);
   const alertedConnectionIds = useRef<Set<string>>(new Set());
+
+  // The onboarding banner is meant for a brand-new user's first visit —
+  // once they've seen the home screen once, it stops reappearing even if
+  // they never finished filling in their profile.
+  useEffect(() => {
+    if (!family?.id) return;
+    const key = `onboarding_seen_${family.id}`;
+    AsyncStorage.getItem(key).then(seen => {
+      if (seen) {
+        setOnboardingSeen(true);
+      } else {
+        setOnboardingSeen(false);
+        AsyncStorage.setItem(key, 'true');
+      }
+    });
+  }, [family?.id]);
 
   async function checkPendingConnections() {
     if (!family) return;
@@ -126,7 +144,7 @@ export default function HomeScreen() {
   ).values());
   const servicesOffered = (family?.services_offered ?? []) as RequestCategory[];
 
-  const isNewUser = !family?.parent1_name || !family?.parent1_phone;
+  const isNewUser = (!family?.parent1_name || !family?.parent1_phone) && !onboardingSeen;
 
   function formatDate(dateStr: string) {
     const d = new Date(dateStr + 'T00:00:00');

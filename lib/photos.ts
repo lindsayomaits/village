@@ -1,4 +1,5 @@
 import * as ImagePicker from 'expo-image-picker';
+import { File } from 'expo-file-system';
 import { Alert } from 'react-native';
 import { supabase } from './supabase';
 
@@ -22,10 +23,13 @@ export async function pickAndUploadAvatar(familyId: string): Promise<string | nu
   const path = `${familyId}/photo.${ext}`;
   const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
 
-  const blob = await (await fetch(uri)).blob();
+  // fetch(uri).blob() silently produces an empty/broken upload for local
+  // file:// URIs on native — expo-file-system's arrayBuffer() reads the
+  // actual bytes off disk instead.
+  const arrayBuffer = await new File(uri).arrayBuffer();
   const { error: uploadError } = await supabase.storage
     .from('avatars')
-    .upload(path, blob, { contentType, upsert: true });
+    .upload(path, arrayBuffer, { contentType, upsert: true });
   if (uploadError) {
     Alert.alert('Upload failed', uploadError.message);
     return null;

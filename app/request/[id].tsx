@@ -2,13 +2,14 @@ import { useState, useCallback } from 'react';
 import { View, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Text } from '../../components/Text';
 import { Avatar } from '../../components/Avatar';
+import { ReminderPicker } from '../../components/ReminderPicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { notifyFamily } from '../../lib/notifications';
-import { addRequestToCalendar, promptForReminder } from '../../lib/calendarReminders';
+import { addRequestToCalendar, scheduleReminders } from '../../lib/calendarReminders';
 import type { Request, RequestCategory } from '../../types';
 
 const CATEGORY_LABELS: Record<RequestCategory, { emoji: string; label: string }> = {
@@ -62,6 +63,7 @@ export default function RequestDetailScreen() {
   const [reqState, setReqState] = useState<Request | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [reminderPickerVisible, setReminderPickerVisible] = useState(false);
 
   async function loadRequest() {
     if (!id) return;
@@ -357,12 +359,21 @@ export default function RequestDetailScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.calendarBtn}
-              onPress={() => promptForReminder(req)}
+              onPress={() => setReminderPickerVisible(true)}
             >
               <Text style={styles.calendarBtnText}>🔔 Set Reminder</Text>
             </TouchableOpacity>
           </View>
         )}
+
+        <ReminderPicker
+          visible={reminderPickerVisible}
+          onClose={() => setReminderPickerVisible(false)}
+          onConfirm={(whens) => {
+            setReminderPickerVisible(false);
+            scheduleReminders(req, whens);
+          }}
+        />
 
         {/* Actions */}
         <View style={styles.actions}>
