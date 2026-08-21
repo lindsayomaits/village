@@ -10,8 +10,22 @@ import { colors } from '../../lib/theme';
 
 export default function ResetPasswordScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ code?: string | string[]; token?: string | string[]; type?: string | string[] }>();
+  const params = useLocalSearchParams<{
+    code?: string | string[];
+    token?: string | string[];
+    token_hash?: string | string[];
+    type?: string | string[];
+    access_token?: string | string[];
+    refresh_token?: string | string[];
+  }>();
+
   const code = Array.isArray(params.code) ? params.code[0] : params.code;
+  const token = Array.isArray(params.token) ? params.token[0] : params.token;
+  const tokenHash = Array.isArray(params.token_hash) ? params.token_hash[0] : params.token_hash;
+  const type = Array.isArray(params.type) ? params.type[0] : params.type;
+  const accessToken = Array.isArray(params.access_token) ? params.access_token[0] : params.access_token;
+  const refreshToken = Array.isArray(params.refresh_token) ? params.refresh_token[0] : params.refresh_token;
+
   const [exchanging, setExchanging] = useState(true);
   const [linkValid, setLinkValid] = useState(false);
   const [password, setPassword] = useState('');
@@ -20,18 +34,58 @@ export default function ResetPasswordScreen() {
 
   useEffect(() => {
     async function exchange() {
-      if (!code) {
+      try {
+        const hashString = Platform.OS === 'web' ? window.location.hash : '';
+        const hashParams = new URLSearchParams(hashString.startsWith('#') ? hashString.slice(1) : hashString);
+
+        const hashCode = hashParams.get('code') ?? undefined;
+        const hashToken = hashParams.get('token') ?? undefined;
+        const hashTokenHash = hashParams.get('token_hash') ?? undefined;
+        const hashType = hashParams.get('type') ?? undefined;
+        const hashAccessToken = hashParams.get('access_token') ?? undefined;
+        const hashRefreshToken = hashParams.get('refresh_token') ?? undefined;
+
+        const effectiveCode = code ?? hashCode;
+        const effectiveToken = token ?? hashToken;
+        const effectiveTokenHash = tokenHash ?? hashTokenHash;
+        const effectiveType = type ?? hashType;
+        const effectiveAccessToken = accessToken ?? hashAccessToken;
+        const effectiveRefreshToken = refreshToken ?? hashRefreshToken;
+
+        if (effectiveCode) {
+          const { error } = await supabase.auth.exchangeCodeForSession(effectiveCode);
+          setLinkValid(!error);
+          setExchanging(false);
+          return;
+        }
+
+        if (effectiveAccessToken && effectiveRefreshToken) {
+          const { error } = await supabase.auth.setSession({
+            access_token: effectiveAccessToken,
+            refresh_token: effectiveRefreshToken,
+          });
+          setLinkValid(!error);
+          setExchanging(false);
+          return;
+        }
+
+        const recoveryHash = effectiveTokenHash ?? effectiveToken;
+        if (recoveryHash && effectiveType === 'recovery') {
+          const { error } = await supabase.auth.verifyOtp({ token_hash: recoveryHash, type: 'recovery' });
+          setLinkValid(!error);
+          setExchanging(false);
+          return;
+        }
+
         setLinkValid(false);
         setExchanging(false);
-        return;
+      } catch {
+        setLinkValid(false);
+        setExchanging(false);
       }
-
-      const { error } = await supabase.auth.exchangeCodeForSession(code);
-      setLinkValid(!error);
-      setExchanging(false);
     }
     exchange();
-  }, [code]);
+  }, [accessToken, code, refreshToken, token, tokenHash, type]);
 
   async function handleSetPassword() {
     if (password.length < 6) return Alert.alert('Password too short', 'Password must be at least 6 characters.');
