@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { supabase } from './supabase';
 
 Notifications.setNotificationHandler({
@@ -16,7 +17,9 @@ function validTokens(...tokens: (string | null | undefined)[]): string[] {
   return tokens.filter((t): t is string => !!t && t.startsWith('ExponentPushToken'));
 }
 
-async function sendPush(messages: { to: string; title: string; body: string; sound: string }[]) {
+type PushData = { path?: string };
+
+async function sendPush(messages: { to: string; title: string; body: string; sound: string; data?: PushData }[]) {
   if (messages.length === 0) return;
   const maxTries = 3;
   let attempt = 0;
@@ -54,7 +57,6 @@ async function sendPush(messages: { to: string; title: string; body: string; sou
             if (token && (err === 'DeviceNotRegistered' || err === 'InvalidCredentials' || err === 'DeviceNotRegisteredError')) {
               try {
                 await supabase.from('families').update({ push_token: null }).eq('push_token', token);
-                await supabase.from('families').update({ partner_push_token: null }).eq('partner_push_token', token);
               } catch (e) {
                 // eslint-disable-next-line no-console
                 console.error('Failed to clear invalid push token', e);
@@ -76,7 +78,9 @@ async function sendPush(messages: { to: string; title: string; body: string; sou
   }
 }
 
-export async function registerForPushNotifications(familyId: string, isPartner: boolean) {
+export async function registerForPushNotifications(familyId: string) {
+  if (Platform.OS === 'web') return;
+
   const { status: existing } = await Notifications.getPermissionsAsync();
   let status = existing;
 
@@ -96,13 +100,13 @@ export async function registerForPushNotifications(familyId: string, isPartner: 
   }
 
   try {
-    const token = (await Notifications.getExpoPushTokenAsync()).data;
-    const field = isPartner ? 'partner_push_token' : 'push_token';
-    await supabase.from('families').update({ [field]: token }).eq('id', familyId);
-  } catch {
+    const projectId = Constants.expoConfig?.extra?.eas?.projectId;
+    const token = (await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined)).data;
+    await supabase.from('families').update({ push_token: token }).eq('id', familyId);
+  } catch (e) {
     // Push token unavailable in dev — will work after EAS deployment
     // eslint-disable-next-line no-console
-    console.warn('Unable to register for push notifications');
+    console.warn('Unable to register for push notifications', e);
   }
 }
 
@@ -110,6 +114,13 @@ export async function notifyConnections(
   familyId: string,
   title: string,
   body: string,
+  data?: PushData,
+  // Only notify connections who've listed this category as something
+  // they're open to helping with (or haven't set preferences at all yet)
+  // — otherwise every new request pings your entire network regardless
+  // of relevance, e.g. a dog-walk request reaching someone who only
+  // marked "professional help".
+  category?: string,
 ) {
   const { data: connections } = await supabase
     .from('connections')
@@ -120,75 +131,44 @@ export async function notifyConnections(
   const connectedIds = (connections ?? []).map(c => c.requester_id === familyId ? c.recipient_id : c.requester_id);
   if (connectedIds.length === 0) return;
 
-  const { data } = await supabase
+  const { data: families } = await supabase
     .from('families')
-    .select('push_token, partner_push_token')
+    .select('push_token, services_offered')
     .in('id', connectedIds);
 
-  const tokens = (data ?? []).flatMap(f => validTokens(f.push_token, f.partner_push_token));
-  await sendPush(tokens.map(to => ({ to, title, body, sound: 'default' })));
+  const relevant = (families ?? []).filter(f =>
+    !category || !f.services_offered || f.services_offered.length === 0 || f.services_offered.includes(category)
+  );
+  const tokens = relevant.flatMap(f => validTokens(f.push_token));
+  await sendPush(tokens.map(to => ({ to, title, body, sound: 'default', data })));
 }
 
 export async function notifyAdmins(
   title: string,
   body: string,
+  data?: PushData,
 ) {
   // Plain families select would be RLS-blocked when the caller (often just
   // a regular reporting household) isn't connected to the admin — this
   // needs to work regardless, so it goes through a security-definer RPC
   // rather than a direct table read.
-  const { data } = await supabase.rpc('get_admin_push_tokens');
-  const tokens: string[] = (data ?? []).flatMap((f: { push_token: string | null; partner_push_token: string | null }) =>
-    validTokens(f.push_token, f.partner_push_token));
-  await sendPush(tokens.map((to: string) => ({ to, title, body, sound: 'default' })));
+  const { data: rows } = await supabase.rpc('get_admin_push_tokens');
+  const tokens: string[] = (rows ?? []).flatMap((f: { push_token: string | null }) => validTokens(f.push_token));
+  await sendPush(tokens.map((to: string) => ({ to, title, body, sound: 'default', data })));
 }
 
 export async function notifyFamily(
   familyId: string,
   title: string,
   body: string,
+  data?: PushData,
 ) {
-  const { data } = await supabase
+  const { data: row } = await supabase
     .from('families')
-    .select('push_token, partner_push_token')
+    .select('push_token')
     .eq('id', familyId)
     .single();
 
-  const tokens = validTokens(data?.push_token, data?.partner_push_token);
-  await sendPush(tokens.map(to => ({ to, title, body, sound: 'default' })));
-}
-
-export async function notifyVillage(
-  senderFamilyId: string,
-  senderName: string,
-  body: string,
-  mentionedTargets: { familyId: string; target: 'primary' | 'partner' | 'both' }[],
-) {
-  const { data } = await supabase
-    .from('families')
-    .select('id, push_token, partner_push_token, village_notifications')
-    .neq('id', senderFamilyId);
-
-  const messages: { to: string; title: string; body: string; sound: string }[] = [];
-
-  for (const f of (data ?? [])) {
-    const pref = f.village_notifications ?? 'all';
-    if (pref === 'muted') continue;
-    const mention = mentionedTargets.find(t => t.familyId === f.id);
-    const isMentioned = !!mention;
-    if (pref === 'mentions' && !isMentioned) continue;
-
-    const title = isMentioned ? `${senderName} mentioned you` : `${senderName} in VillageMates`;
-    // A mention pings only the tagged person's device; an ordinary
-    // broadcast (not mentioned, pref = 'all') still reaches the whole household.
-    const tokens = !isMentioned ? validTokens(f.push_token, f.partner_push_token)
-      : mention.target === 'primary' ? validTokens(f.push_token)
-      : mention.target === 'partner' ? validTokens(f.partner_push_token)
-      : validTokens(f.push_token, f.partner_push_token);
-    for (const to of tokens) {
-      messages.push({ to, title, body, sound: 'default' });
-    }
-  }
-
-  await sendPush(messages);
+  const tokens = validTokens(row?.push_token);
+  await sendPush(tokens.map(to => ({ to, title, body, sound: 'default', data })));
 }

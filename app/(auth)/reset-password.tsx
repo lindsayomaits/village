@@ -10,7 +10,8 @@ import { colors } from '../../lib/theme';
 
 export default function ResetPasswordScreen() {
   const router = useRouter();
-  const { code } = useLocalSearchParams<{ code?: string }>();
+  const params = useLocalSearchParams<{ code?: string | string[]; token?: string | string[]; type?: string | string[] }>();
+  const code = Array.isArray(params.code) ? params.code[0] : params.code;
   const [exchanging, setExchanging] = useState(true);
   const [linkValid, setLinkValid] = useState(false);
   const [password, setPassword] = useState('');
@@ -19,7 +20,12 @@ export default function ResetPasswordScreen() {
 
   useEffect(() => {
     async function exchange() {
-      if (!code) { setExchanging(false); return; }
+      if (!code) {
+        setLinkValid(false);
+        setExchanging(false);
+        return;
+      }
+
       const { error } = await supabase.auth.exchangeCodeForSession(code);
       setLinkValid(!error);
       setExchanging(false);
