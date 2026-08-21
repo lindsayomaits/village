@@ -1,9 +1,6 @@
-export function lastNamesLabel(f: { name: string; parent1_name: string | null; parent2_name: string | null }): string {
+export function lastNamesLabel(f: { name: string; parent1_name: string | null }): string {
   const lastName = (full: string) => full.trim().split(/\s+/).pop() ?? '';
-  const l1 = f.parent1_name ? lastName(f.parent1_name) : '';
-  const l2 = f.parent2_name ? lastName(f.parent2_name) : '';
-  if (l1 && l2) return l1 === l2 ? l1 : `${l1} & ${l2}`;
-  return l1 || l2 || f.name;
+  return f.parent1_name ? lastName(f.parent1_name) : f.name;
 }
 
 export function isValidEmail(email: string): boolean {
@@ -23,6 +20,16 @@ export function displayKidsData(kids: { name: string; birthday: string | null }[
   return kids
     .filter(k => k.name.trim())
     .map(k => k.birthday ? `${k.name.trim()} (age ${calcAge(k.birthday)})` : k.name.trim())
+    .join(', ');
+}
+
+export function displayPetsData(pets: { name: string; animal: string; size: string | null }[]): string {
+  return pets
+    .filter(p => p.name.trim())
+    .map(p => {
+      const details = [p.animal.trim(), p.size].filter(Boolean).join(', ');
+      return details ? `${p.name.trim()} (${details})` : p.name.trim();
+    })
     .join(', ');
 }
 
@@ -51,4 +58,23 @@ export function renderKidsInfo(raw: string | null | undefined): string | null {
       return `age ${age}`;
     }
   );
+}
+
+// start_time is often a real clock time ("2:30 PM") but can also be free
+// text for a flexible-timing request ("Morning · Mon, Tue") — falls
+// through to a 9am fallback on that date rather than producing an
+// Invalid Date.
+export function combineDateAndTime(dateStr: string, timeStr: string): Date {
+  const d = new Date(dateStr + 'T00:00:00');
+  const upper = timeStr.toUpperCase();
+  const isPM = upper.includes('PM');
+  const isAM = upper.includes('AM');
+  const clean = timeStr.replace(/[APM\s]/gi, '');
+  const [h, m] = clean.split(':').map(Number);
+  let hours = h;
+  if (isPM && h !== 12) hours += 12;
+  if (isAM && h === 12) hours = 0;
+  if (!Number.isFinite(hours)) { d.setHours(9, 0, 0, 0); return d; }
+  d.setHours(hours, m || 0, 0, 0);
+  return d;
 }

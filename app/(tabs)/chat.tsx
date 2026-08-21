@@ -1,234 +1,45 @@
 import { useState, useEffect, useCallback } from 'react';
-import {
-  View, StyleSheet, FlatList, TextInput, TouchableOpacity,
-  Alert, KeyboardAvoidingView, Platform, Modal,
-} from 'react-native';
+import { View, StyleSheet, FlatList, TouchableOpacity, TextInput, Modal, Alert, ActivityIndicator } from 'react-native';
 import { Text } from '../../components/Text';
+import { Avatar } from '../../components/Avatar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
-import { notifyVillage, notifyFamily } from '../../lib/notifications';
-import type { Post, Family, PostReaction, Request, MentionTarget } from '../../types';
-
-type Tab = 'village' | 'direct';
-type NotifPref = 'all' | 'mentions' | 'muted';
-
-type MentionEntry = { label: string; familyId: string; target: MentionTarget; animal: string | null };
-
-const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '👎'];
-
-function buildMentionEntries(allFamilies: Family[]): MentionEntry[] {
-  const entries: MentionEntry[] = [];
-  for (const f of allFamilies) {
-    const p1 = f.parent1_name?.trim();
-    const p2 = f.parent2_name?.trim();
-    if (p1 && p2 && p1 !== p2) {
-      entries.push({ label: p1, familyId: f.id, target: 'primary', animal: f.animal });
-      entries.push({ label: p2, familyId: f.id, target: 'partner', animal: f.animal });
-      entries.push({ label: `${p1} & ${p2}`, familyId: f.id, target: 'both', animal: f.animal });
-    } else if (p1 || p2) {
-      entries.push({ label: (p1 || p2) as string, familyId: f.id, target: p1 ? 'primary' : 'partner', animal: f.animal });
-    } else {
-      entries.push({ label: f.name, familyId: f.id, target: 'both', animal: f.animal });
-    }
-  }
-  return entries;
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Which trigger (@ for a person, # for a request) is being typed right now, if any.
-function getActiveTrigger(text: string, cursor: number): { type: '@' | '#'; query: string } | null {
-  const before = text.slice(0, cursor);
-  const match = before.match(/([@#])([^\s@#]*)$/);
-  if (!match) return null;
-  return { type: match[1] as '@' | '#', query: match[2] };
-}
-
-function extractMentionedTargets(body: string, entries: MentionEntry[]): { familyId: string; target: MentionTarget }[] {
-  if (entries.length === 0) return [];
-  const sorted = [...entries].sort((a, b) => b.label.length - a.label.length);
-  const pattern = new RegExp(`@(${sorted.map(e => escapeRegex(e.label)).join('|')})(?=\\s|$)`, 'g');
-  const found: { familyId: string; target: MentionTarget }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(body)) !== null) {
-    const entry = sorted.find(e => e.label === m![1]);
-    if (entry) found.push({ familyId: entry.familyId, target: entry.target });
-  }
-  return found;
-}
-
-function extractTaggedRequests(body: string, openRequests: Request[]): Request[] {
-  if (openRequests.length === 0) return [];
-  const sorted = [...openRequests].sort((a, b) => b.title.length - a.title.length);
-  const pattern = new RegExp(`#(${sorted.map(r => escapeRegex(r.title)).join('|')})(?=\\s|$)`, 'g');
-  const found: Request[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(body)) !== null) {
-    const req = sorted.find(r => r.title === m![1]);
-    if (req) found.push(req);
-  }
-  return found;
-}
-
-type Segment =
-  | { type: 'text'; text: string }
-  | { type: 'mention'; label: string; entry: MentionEntry }
-  | { type: 'tag'; label: string; request: Request };
-
-function buildSegments(body: string, mentionEntries: MentionEntry[], openRequests: Request[]): Segment[] {
-  const matches: { index: number; length: number; seg: Segment }[] = [];
-
-  if (mentionEntries.length > 0) {
-    const sorted = [...mentionEntries].sort((a, b) => b.label.length - a.label.length);
-    const pattern = new RegExp(`@(${sorted.map(e => escapeRegex(e.label)).join('|')})(?=\\s|$)`, 'g');
-    let m: RegExpExecArray | null;
-    while ((m = pattern.exec(body)) !== null) {
-      const entry = sorted.find(e => e.label === m![1]);
-      if (entry) matches.push({ index: m.index, length: m[0].length, seg: { type: 'mention', label: m[0], entry } });
-    }
-  }
-
-  if (openRequests.length > 0) {
-    const sorted = [...openRequests].sort((a, b) => b.title.length - a.title.length);
-    const pattern = new RegExp(`#(${sorted.map(r => escapeRegex(r.title)).join('|')})(?=\\s|$)`, 'g');
-    let m: RegExpExecArray | null;
-    while ((m = pattern.exec(body)) !== null) {
-      const req = sorted.find(r => r.title === m![1]);
-      if (req) matches.push({ index: m.index, length: m[0].length, seg: { type: 'tag', label: m[0], request: req } });
-    }
-  }
-
-  matches.sort((a, b) => a.index - b.index);
-  const clean: typeof matches = [];
-  let cursor = 0;
-  for (const mm of matches) {
-    if (mm.index < cursor) continue;
-    clean.push(mm);
-    cursor = mm.index + mm.length;
-  }
-
-  const segments: Segment[] = [];
-  let last = 0;
-  for (const mm of clean) {
-    if (mm.index > last) segments.push({ type: 'text', text: body.slice(last, mm.index) });
-    segments.push(mm.seg);
-    last = mm.index + mm.length;
-  }
-  if (last < body.length) segments.push({ type: 'text', text: body.slice(last) });
-  return segments;
-}
-
-function RichText({
-  body, mentionEntries, openRequests, myFamilyId, isPartnerViewer, isOwn, onTagPress,
-}: {
-  body: string; mentionEntries: MentionEntry[]; openRequests: Request[];
-  myFamilyId: string; isPartnerViewer: boolean; isOwn: boolean;
-  onTagPress: (request: Request) => void;
-}) {
-  if (mentionEntries.length === 0 && openRequests.length === 0) {
-    return <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>{body}</Text>;
-  }
-  const segments = buildSegments(body, mentionEntries, openRequests);
-  return (
-    <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>
-      {segments.map((seg, i) => {
-        if (seg.type === 'text') return <Text key={i}>{seg.text}</Text>;
-        if (seg.type === 'mention') {
-          const isMe = seg.entry.familyId === myFamilyId && (
-            seg.entry.target === 'both'
-            || (seg.entry.target === 'primary' && !isPartnerViewer)
-            || (seg.entry.target === 'partner' && isPartnerViewer)
-          );
-          return (
-            <Text key={i} style={[styles.mention, isOwn ? styles.mentionOwn : styles.mentionOther, isMe && (isOwn ? styles.mentionMeOwn : styles.mentionMe)]}>
-              {seg.label}
-            </Text>
-          );
-        }
-        return (
-          <Text key={i} style={[styles.tag, isOwn ? styles.tagOwn : styles.tagOther]} onPress={() => onTagPress(seg.request)}>
-            {seg.label}
-          </Text>
-        );
-      })}
-    </Text>
-  );
-}
+import type { Family, GroupChat } from '../../types';
 
 export default function ChatScreen() {
-  const { family, session } = useAuth();
+  const { family } = useAuth();
   const router = useRouter();
-  const isPartnerViewer = !!session?.user.id && session.user.id === family?.partner_user_id;
-  const [tab, setTab] = useState<Tab>('village');
-
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [mutes, setMutes] = useState<Set<string>>(new Set());
-  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
-  const [postBody, setPostBody] = useState('');
-  const [posting, setPosting] = useState(false);
-  const [notifPref, setNotifPref] = useState<NotifPref>('all');
-  const [cursorPos, setCursorPos] = useState(0);
-  const [reactionTarget, setReactionTarget] = useState<Post | null>(null);
 
   const [families, setFamilies] = useState<Family[]>([]);
   const [connectedIds, setConnectedIds] = useState<Set<string>>(new Set());
+  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
   const [dmHistoryIds, setDmHistoryIds] = useState<Set<string>>(new Set());
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
-  const [openRequests, setOpenRequests] = useState<Request[]>([]);
+
+  const [groups, setGroups] = useState<GroupChat[]>([]);
+  const [groupUnread, setGroupUnread] = useState<Record<string, number>>({});
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
+  const [creatingGroup, setCreatingGroup] = useState(false);
 
   const directFamilies = families.filter(f => connectedIds.has(f.id));
   // Households you've messaged before but aren't connected to anymore —
   // history stays reachable (read-only) instead of just vanishing.
   const pastConversations = families.filter(f => !connectedIds.has(f.id) && dmHistoryIds.has(f.id) && !blockedIds.has(f.id));
-  // Only people you're connected to are taggable — not the whole village.
-  const mentionEntries = buildMentionEntries(directFamilies);
-
-  const activeTrigger = getActiveTrigger(postBody, cursorPos);
-  const mentionResults = activeTrigger?.type === '@'
-    ? mentionEntries.filter(e => e.label.toLowerCase().startsWith(activeTrigger.query.toLowerCase())).slice(0, 5)
-    : [];
-  const requestResults = activeTrigger?.type === '#'
-    ? openRequests.filter(r => r.title.toLowerCase().startsWith(activeTrigger.query.toLowerCase())).slice(0, 5)
-    : [];
 
   useFocusEffect(useCallback(() => {
-    loadPosts();
-    loadMutes();
     loadBlocked();
     loadFamilies();
     loadConnections();
     loadDmHistoryIds();
-    loadOpenRequests();
     loadUnreadCounts();
-    setNotifPref(family?.village_notifications ?? 'all');
+    loadGroups();
   }, [family?.id]));
-
-  useEffect(() => {
-    const channel = supabase
-      .channel('village_chat_rt')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, async (payload) => {
-        const newId = (payload.new as Post).id;
-        const { data } = await supabase
-          .from('posts')
-          .select('*, family:families_public!family_id(*), reactions:post_reactions(*)')
-          .eq('id', newId)
-          .single();
-        if (data) setPosts(prev => prev.some(p => p.id === newId) ? prev : [data, ...prev]);
-      })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'posts' }, (payload) => {
-        setPosts(prev => prev.filter(p => p.id !== (payload.old as { id: string }).id));
-      })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'post_reactions' }, () => { loadPosts(); })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'post_reactions' }, () => { loadPosts(); })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, []);
 
   useEffect(() => {
     if (!family) return;
@@ -236,35 +47,10 @@ export default function ChatScreen() {
       .channel('dm_unread_rt')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages',
         filter: `to_family_id=eq.${family.id}` }, () => { loadUnreadCounts(); })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'group_messages' }, () => { loadGroupUnread(groups); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [family?.id]);
-
-  async function loadPosts() {
-    const { data, error } = await supabase
-      .from('posts')
-      .select('*, family:families_public!family_id(*), reactions:post_reactions(*)')
-      .order('created_at', { ascending: false })
-      .limit(100);
-    if (error) {
-      // eslint-disable-next-line no-console
-      console.error('loadPosts error', error);
-      Alert.alert('Error', 'Could not load posts. Check your connection.');
-      return;
-    }
-    setPosts(data ?? []);
-  }
-
-  async function loadMutes() {
-    if (!family) return;
-    const { data, error } = await supabase.from('mutes').select('muted_family_id').eq('family_id', family.id);
-    if (error) {
-      // eslint-disable-next-line no-console
-      console.error('loadMutes error', error);
-      return;
-    }
-    setMutes(new Set((data ?? []).map((m: { muted_family_id: string }) => m.muted_family_id)));
-  }
+  }, [family?.id, groups]);
 
   async function loadBlocked() {
     if (!family) return;
@@ -281,8 +67,7 @@ export default function ChatScreen() {
     if (!family) return;
     // families_public covers everyone (name/animal only, no PII); families
     // additionally returns parent names but only for rows RLS allows (self,
-    // admin, or connected) — merge so connected households get real names
-    // for @mentions while everyone else safely falls back to household name.
+    // admin, or connected) — merge so connected households get real names.
     const [{ data: pub, error }, { data: full }] = await Promise.all([
       supabase.from('families_public').select('*').neq('id', family.id).order('name'),
       supabase.from('families').select('*').neq('id', family.id),
@@ -315,20 +100,6 @@ export default function ChatScreen() {
     setDmHistoryIds(ids);
   }
 
-  async function loadOpenRequests() {
-    const { data, error } = await supabase
-      .from('requests')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (error) {
-      // eslint-disable-next-line no-console
-      console.error('loadOpenRequests error', error);
-      return;
-    }
-    setOpenRequests(data ?? []);
-  }
-
   async function loadConnections() {
     if (!family) return;
     const { data, error } = await supabase
@@ -357,187 +128,50 @@ export default function ChatScreen() {
     setUnreadCounts(counts);
   }
 
-  async function cycleNotifPref() {
+  async function loadGroups() {
     if (!family) return;
-    const prev = notifPref;
-    const next: NotifPref = notifPref === 'all' ? 'mentions' : notifPref === 'mentions' ? 'muted' : 'all';
-    setNotifPref(next);
-    const { error } = await supabase.from('families').update({ village_notifications: next }).eq('id', family.id);
-    if (error) {
-      // revert
-      setNotifPref(prev);
-      // eslint-disable-next-line no-console
-      console.error('cycleNotifPref error', error);
-      Alert.alert('Error', 'Could not update notification preferences.');
-    }
+    const { data: memberships } = await supabase.from('group_chat_members').select('group_id').eq('family_id', family.id);
+    const groupIds = (memberships ?? []).map(m => m.group_id);
+    if (groupIds.length === 0) { setGroups([]); setGroupUnread({}); return; }
+    const { data } = await supabase.from('group_chats').select('*').in('id', groupIds).order('created_at', { ascending: false });
+    const loaded = data ?? [];
+    setGroups(loaded);
+    await loadGroupUnread(loaded);
   }
 
-  function insertMention(entry: MentionEntry) {
-    const before = postBody.slice(0, cursorPos);
-    const after = postBody.slice(cursorPos);
-    const newBefore = before.replace(/@[^\s]*$/, `@${entry.label} `);
-    setPostBody(newBefore + after);
-    setCursorPos(newBefore.length);
+  async function loadGroupUnread(groupList: GroupChat[]) {
+    if (!family || groupList.length === 0) return;
+    const { data: reads } = await supabase.from('group_message_reads').select('group_id, last_read_at').eq('family_id', family.id);
+    const lastReadByGroup = new Map((reads ?? []).map(r => [r.group_id, r.last_read_at]));
+    const counts: Record<string, number> = {};
+    await Promise.all(groupList.map(async g => {
+      const since = lastReadByGroup.get(g.id) ?? g.created_at;
+      const { count } = await supabase
+        .from('group_messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('group_id', g.id)
+        .neq('from_family_id', family.id)
+        .gt('created_at', since);
+      counts[g.id] = count ?? 0;
+    }));
+    setGroupUnread(counts);
   }
 
-  function insertRequestTag(req: Request) {
-    const before = postBody.slice(0, cursorPos);
-    const after = postBody.slice(cursorPos);
-    const newBefore = before.replace(/#[^\s]*$/, `#${req.title} `);
-    setPostBody(newBefore + after);
-    setCursorPos(newBefore.length);
-  }
-
-  function goToTaggedRequest(req: Request) {
-    router.push({
-      pathname: '/(tabs)/requests',
-      params: { postType: req.post_type, filter: req.requesting_family_id === family?.id ? 'mine' : 'open' },
+  async function createGroup() {
+    if (!family || !newGroupName.trim() || selectedMemberIds.size === 0) return;
+    setCreatingGroup(true);
+    const { data, error } = await supabase.rpc('create_group_chat', {
+      p_name: newGroupName.trim(),
+      p_member_ids: Array.from(selectedMemberIds),
     });
-  }
-
-  async function sendPost() {
-    if (!family || !postBody.trim()) return;
-    setPosting(true);
-    const body = postBody.trim();
-    setPostBody('');
-    setCursorPos(0);
-
-    const { data, error } = await supabase
-      .from('posts')
-      .insert({ family_id: family.id, body })
-      .select('*, family:families_public!family_id(*), reactions:post_reactions(*)')
-      .single();
-
-    if (error) {
-      setPostBody(body);
-      setPosting(false);
-      return Alert.alert('Could not send', error.message);
-    }
-
-    if (data) setPosts(prev => [data, ...prev]);
-    notifyVillage(family.id, family.name, body, extractMentionedTargets(body, mentionEntries)).catch(() => {});
-    for (const req of extractTaggedRequests(body, openRequests)) {
-      if (req.requesting_family_id === family.id) continue;
-      notifyFamily(req.requesting_family_id, `📌 ${family.name} tagged your post`, `"${req.title}" was mentioned in Village Chat`).catch(() => {});
-    }
-    setPosting(false);
-  }
-
-  async function toggleReaction(postId: string, emoji: string) {
-    if (!family) return;
-    const post = posts.find(p => p.id === postId);
-    const existing = post?.reactions?.find(r => r.family_id === family.id && r.emoji === emoji);
-
-    if (existing) {
-      const { error } = await supabase.from('post_reactions').delete().eq('id', existing.id);
-      if (error) {
-        // eslint-disable-next-line no-console
-        console.error('toggleReaction delete error', error);
-        Alert.alert('Error', 'Could not remove reaction.');
-        return;
-      }
-      setPosts(prev => prev.map(p => p.id !== postId ? p : {
-        ...p, reactions: (p.reactions ?? []).filter(r => r.id !== existing.id),
-      }));
-    } else {
-      const temp: PostReaction = { id: `temp-${Date.now()}`, post_id: postId, family_id: family.id, emoji, created_at: new Date().toISOString() };
-      setPosts(prev => prev.map(p => p.id !== postId ? p : { ...p, reactions: [...(p.reactions ?? []), temp] }));
-      const { error } = await supabase.from('post_reactions').insert({ post_id: postId, family_id: family.id, emoji });
-      if (error) {
-        // rollback temp reaction
-        setPosts(prev => prev.map(p => p.id !== postId ? p : ({ ...p, reactions: (p.reactions ?? []).filter(r => !r.id?.toString().startsWith('temp-')) })));
-        // eslint-disable-next-line no-console
-        console.error('toggleReaction insert error', error);
-        Alert.alert('Error', 'Could not add reaction.');
-      }
-    }
-  }
-
-  async function deletePost(post: Post) {
-    const { error } = await supabase.from('posts').delete().eq('id', post.id);
+    setCreatingGroup(false);
     if (error) return Alert.alert('Error', error.message);
-    setPosts(prev => prev.filter(p => p.id !== post.id));
+    setShowCreateGroup(false);
+    setNewGroupName('');
+    setSelectedMemberIds(new Set());
+    await loadGroups();
+    if (data) router.push(`/group/${data}`);
   }
-
-  async function toggleMute(familyId: string) {
-    if (!family) return;
-    const isMuted = mutes.has(familyId);
-    if (isMuted) {
-      const { error } = await supabase.from('mutes').delete().eq('family_id', family.id).eq('muted_family_id', familyId);
-      if (error) {
-        // eslint-disable-next-line no-console
-        console.error('toggleMute unmute error', error);
-        Alert.alert('Error', 'Could not unmute.');
-        return;
-      }
-      setMutes(prev => { const next = new Set(prev); next.delete(familyId); return next; });
-    } else {
-      const { error } = await supabase.from('mutes').insert({ family_id: family.id, muted_family_id: familyId });
-      if (error) {
-        // eslint-disable-next-line no-console
-        console.error('toggleMute mute error', error);
-        Alert.alert('Error', 'Could not mute.');
-        return;
-      }
-      setMutes(prev => new Set([...prev, familyId]));
-    }
-  }
-
-  function formatTime(iso: string) {
-    const d = new Date(iso);
-    if (d.toDateString() === new Date().toDateString()) {
-      return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-    }
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  }
-
-  const renderPost = ({ item }: { item: Post }) => {
-    const isOwn = item.family_id === family?.id;
-
-    const reactionGroups = (item.reactions ?? []).reduce((acc, r) => {
-      if (!acc[r.emoji]) acc[r.emoji] = { count: 0, isMine: false };
-      acc[r.emoji].count++;
-      if (r.family_id === family?.id) acc[r.emoji].isMine = true;
-      return acc;
-    }, {} as Record<string, { count: number; isMine: boolean }>);
-
-    return (
-      <TouchableOpacity onLongPress={() => setReactionTarget(item)} activeOpacity={0.85}>
-        <View style={[styles.postRow, isOwn ? styles.postRowOwn : styles.postRowOther]}>
-          <View style={[styles.bubble, isOwn ? styles.bubbleOwn : styles.bubbleOther]}>
-            <Text style={[styles.bubbleFamily, isOwn && styles.bubbleFamilyOwn]}>
-              {getFamilyAnimal(item.family_id, item.family?.animal)}{'  '}{item.family?.name ?? (isOwn ? family?.name : '…')}
-            </Text>
-            <RichText
-              body={item.body}
-              mentionEntries={mentionEntries}
-              openRequests={openRequests}
-              myFamilyId={family?.id ?? ''}
-              isPartnerViewer={!!isPartnerViewer}
-              isOwn={isOwn}
-              onTagPress={goToTaggedRequest}
-            />
-            <Text style={[styles.bubbleTime, isOwn && styles.bubbleTimeOwn]}>{formatTime(item.created_at)}</Text>
-            {Object.keys(reactionGroups).length > 0 && (
-              <View style={styles.reactionsRow}>
-                {Object.entries(reactionGroups).map(([emoji, { count, isMine }]) => (
-                  <TouchableOpacity
-                    key={emoji}
-                    style={[styles.reactionPill, isMine && styles.reactionPillMine]}
-                    onPress={() => toggleReaction(item.id, emoji)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${emoji} reaction, ${count} ${count === 1 ? 'person' : 'people'}${isMine ? ', including you' : ''}. Tap to toggle.`}
-                  >
-                    <Text style={styles.reactionPillText}>{emoji} {count}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  };
 
   const renderFamily = ({ item }: { item: Family }) => {
     const unread = unreadCounts[item.id] ?? 0;
@@ -559,199 +193,125 @@ export default function ChatScreen() {
     );
   };
 
-  const visiblePosts = posts.filter(p => !mutes.has(p.family_id) && !blockedIds.has(p.family_id));
-  // Only count unread from households still connected — otherwise the
-  // badge can promise a count you have no way to open (no row for a
-  // disconnected household in the Direct list below).
-  const totalUnread = Object.entries(unreadCounts)
-    .filter(([familyId]) => connectedIds.has(familyId))
-    .reduce((a, [, count]) => a + count, 0);
-  const notifLabel = notifPref === 'all' ? 'All' : notifPref === 'mentions' ? 'Mentions' : 'Muted';
-  const notifIcon = notifPref === 'muted' ? '🔕' : '🔔';
-  const targetIsOwn = reactionTarget?.family_id === family?.id;
-  const targetIsMuted = mutes.has(reactionTarget?.family_id ?? '');
-
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.titleRow}>
         <Text style={styles.title}>Messages</Text>
-        {tab === 'village' && (
-          <TouchableOpacity style={styles.notifBtn} onPress={cycleNotifPref}>
-            <Text style={styles.notifIcon}>{notifIcon}</Text>
-            <Text style={styles.notifText}>{notifLabel}</Text>
+        {directFamilies.length > 0 && (
+          <TouchableOpacity style={styles.newGroupBtn} onPress={() => setShowCreateGroup(true)}>
+            <Text style={styles.newGroupBtnText}>+ Group Message</Text>
           </TouchableOpacity>
         )}
       </View>
 
       {!family && (
         <View style={styles.unlinkBanner}>
-          <Text style={styles.unlinkText}>
-            ⚠️ Your account isn't linked to a family yet — you can read but not post. Ask your partner to check the Profile tab and re-send the partner invite, or contact your admin.
-          </Text>
+          <Text style={styles.unlinkText}>⚠️ We couldn't find your profile. Try signing out and back in — if this keeps happening, contact support.</Text>
         </View>
       )}
 
-      <View style={styles.tabs}>
-        <TouchableOpacity style={[styles.tab, tab === 'village' && styles.tabActive]} onPress={() => setTab('village')}>
-          <Text style={[styles.tabText, tab === 'village' && styles.tabTextActive]}>Village Chat</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.tab, tab === 'direct' && styles.tabActive]} onPress={() => setTab('direct')}>
-          <Text style={[styles.tabText, tab === 'direct' && styles.tabTextActive]}>
-            Direct Messages{totalUnread > 0 ? ` (${totalUnread})` : ''}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {tab === 'village' ? (
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={90}>
-          {visiblePosts.length === 0 ? (
-            <View style={[styles.empty, { flex: 1 }]}>
-              <Text style={styles.emptyIcon}>💬</Text>
-              <Text style={styles.emptyText}>No messages yet — say hi to your VillageMates!</Text>
+      <FlatList
+        data={directFamilies}
+        keyExtractor={(item) => item.id}
+        renderItem={renderFamily}
+        contentContainerStyle={styles.dmList}
+        ListHeaderComponent={
+          groups.length > 0 ? (
+            <View style={styles.groupsSection}>
+              <Text style={styles.sectionLabel}>Groups</Text>
+              {groups.map(g => {
+                const unread = groupUnread[g.id] ?? 0;
+                return (
+                  <TouchableOpacity key={g.id} style={styles.dmRow} onPress={() => router.push(`/group/${g.id}`)}>
+                    <View style={styles.dmAvatar}>
+                      <Text style={styles.dmAvatarText}>👥</Text>
+                    </View>
+                    <Text style={styles.dmName}>{g.name}</Text>
+                    {unread > 0 && (
+                      <View style={styles.unreadBadge}>
+                        <Text style={styles.unreadText}>{unread}</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+              <Text style={[styles.sectionLabel, { marginTop: 12 }]}>Direct Messages</Text>
             </View>
-          ) : (
-            <FlatList
-              data={visiblePosts}
-              keyExtractor={(item) => item.id}
-              renderItem={renderPost}
-              inverted
-              contentContainerStyle={styles.postList}
-            />
-          )}
-          {activeTrigger?.type === '@' && mentionResults.length > 0 && (
-            <View style={styles.mentionDropdown}>
-              {mentionResults.map(e => (
-                <TouchableOpacity key={`${e.familyId}-${e.target}`} style={styles.mentionItem} onPress={() => insertMention(e)}>
-                  <Text style={styles.mentionItemEmoji}>{getFamilyAnimal(e.familyId, e.animal)}</Text>
-                  <Text style={styles.mentionItemName}>{e.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-          {activeTrigger?.type === '#' && requestResults.length > 0 && (
-            <View style={styles.mentionDropdown}>
-              {requestResults.map(r => (
-                <TouchableOpacity key={r.id} style={styles.mentionItem} onPress={() => insertRequestTag(r)}>
-                  <Text style={styles.mentionItemEmoji}>{r.post_type === 'offering' ? '🙋' : '📋'}</Text>
-                  <Text style={styles.mentionItemName} numberOfLines={1}>{r.title}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-          {!activeTrigger && (
-            <Text style={styles.composerHint}>Type @ to tag someone, # to tag a post</Text>
-          )}
-          <View style={styles.inputRow}>
-            <TextInput
-              style={styles.input}
-              placeholder="Message your VillageMates..."
-              placeholderTextColor={colors.textMuted}
-              value={postBody}
-              onChangeText={(text) => { setPostBody(text); setCursorPos(text.length); }}
-              onSelectionChange={(e) => setCursorPos(e.nativeEvent.selection.end)}
-              multiline
-            />
-            <TouchableOpacity
-              style={[styles.sendBtn, !postBody.trim() && styles.sendBtnDisabled]}
-              onPress={sendPost}
-              disabled={posting || !postBody.trim()}
-            >
-              <Text style={styles.sendIcon}>↑</Text>
+          ) : null
+        }
+        ListEmptyComponent={
+          <View style={styles.empty}>
+            <Text style={styles.emptyIcon}>👥</Text>
+            <Text style={styles.emptyText}>Connect with people in Village to start a chat</Text>
+            <TouchableOpacity style={styles.emptyActionBtn} onPress={() => router.push('/(tabs)/members')}>
+              <Text style={styles.emptyActionBtnText}>Go to Village</Text>
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
-      ) : (
-        <FlatList
-          data={directFamilies}
-          keyExtractor={(item) => item.id}
-          renderItem={renderFamily}
-          contentContainerStyle={styles.dmList}
-          ListEmptyComponent={
-            <View style={styles.empty}>
-              <Text style={styles.emptyIcon}>👥</Text>
-              <Text style={styles.emptyText}>Connect with households in Members to start a chat</Text>
-            </View>
-          }
-          ListFooterComponent={pastConversations.length > 0 ? (
-            <View style={styles.pastConvoSection}>
-              <Text style={styles.pastConvoHeader}>Past Conversations</Text>
-              <Text style={styles.pastConvoHint}>No longer connected — you can still read, not send.</Text>
-              {pastConversations.map(item => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={[styles.dmRow, styles.dmRowPast]}
-                  onPress={() => router.push({ pathname: '/dm/[familyId]', params: { familyId: item.id, name: item.name } })}
-                >
-                  <View style={styles.dmAvatar}>
-                    <Text style={styles.dmAvatarText}>{getFamilyAnimal(item.id, item.animal)}</Text>
-                  </View>
-                  <Text style={styles.dmName}>{item.name}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ) : null}
-        />
-      )}
+        }
+        ListFooterComponent={pastConversations.length > 0 ? (
+          <View style={styles.pastConvoSection}>
+            <Text style={styles.pastConvoHeader}>Past Conversations</Text>
+            <Text style={styles.pastConvoHint}>No longer connected — you can still read, not send.</Text>
+            {pastConversations.map(item => (
+              <TouchableOpacity
+                key={item.id}
+                style={[styles.dmRow, styles.dmRowPast]}
+                onPress={() => router.push({ pathname: '/dm/[familyId]', params: { familyId: item.id, name: item.name } })}
+              >
+                <View style={styles.dmAvatar}>
+                  <Text style={styles.dmAvatarText}>{getFamilyAnimal(item.id, item.animal)}</Text>
+                </View>
+                <Text style={styles.dmName}>{item.name}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+      />
 
-      {/* Reaction bottom sheet */}
-      <Modal
-        visible={!!reactionTarget}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setReactionTarget(null)}
-      >
-        <TouchableOpacity style={styles.sheetBackdrop} activeOpacity={1} onPress={() => setReactionTarget(null)} />
-        <View style={styles.reactionSheet}>
+      <Modal visible={showCreateGroup} transparent animationType="slide" onRequestClose={() => setShowCreateGroup(false)}>
+        <TouchableOpacity style={styles.sheetBackdrop} activeOpacity={1} onPress={() => setShowCreateGroup(false)} />
+        <View style={styles.createSheet}>
           <View style={styles.sheetHandle} />
-          <Text style={styles.sheetHint}>Hold to react · tap to toggle</Text>
-          <View style={styles.emojiRow}>
-            {REACTION_EMOJIS.map(emoji => {
-              const isMine = reactionTarget?.reactions?.some(r => r.family_id === family?.id && r.emoji === emoji);
+          <Text style={styles.createTitle}>New Group</Text>
+          <TextInput
+            style={styles.createNameInput}
+            placeholder="Group name"
+            placeholderTextColor={colors.textMuted}
+            value={newGroupName}
+            onChangeText={setNewGroupName}
+          />
+          <Text style={styles.createSubLabel}>Add people</Text>
+          <FlatList
+            style={styles.createMemberList}
+            data={directFamilies}
+            keyExtractor={item => item.id}
+            renderItem={({ item }) => {
+              const selected = selectedMemberIds.has(item.id);
               return (
                 <TouchableOpacity
-                  key={emoji}
-                  style={[styles.emojiBtn, isMine && styles.emojiBtnActive]}
-                  onPress={() => { if (reactionTarget) toggleReaction(reactionTarget.id, emoji); setReactionTarget(null); }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`React with ${emoji}`}
+                  style={styles.memberPickRow}
+                  onPress={() => setSelectedMemberIds(prev => {
+                    const next = new Set(prev);
+                    if (selected) next.delete(item.id); else next.add(item.id);
+                    return next;
+                  })}
                 >
-                  <Text style={styles.emojiChar}>{emoji}</Text>
+                  <Avatar familyId={item.id} animal={item.animal} photoUrl={item.photo_url} size={32} />
+                  <Text style={styles.memberPickName}>{item.name}</Text>
+                  <View style={[styles.checkbox, selected && styles.checkboxChecked]}>
+                    {selected && <Text style={styles.checkmark}>✓</Text>}
+                  </View>
                 </TouchableOpacity>
               );
-            })}
-          </View>
-
-          <View style={styles.sheetActions}>
-            {targetIsOwn ? (
-              <TouchableOpacity
-                style={styles.sheetActionBtn}
-                onPress={() => {
-                  if (reactionTarget) {
-                    Alert.alert('Delete this message?', undefined, [
-                      { text: 'Cancel', style: 'cancel' },
-                      { text: 'Delete', style: 'destructive', onPress: () => deletePost(reactionTarget) },
-                    ]);
-                  }
-                  setReactionTarget(null);
-                }}
-              >
-                <Text style={styles.deleteText}>Delete message</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={styles.sheetActionBtn}
-                onPress={() => {
-                  if (reactionTarget) toggleMute(reactionTarget.family_id);
-                  setReactionTarget(null);
-                }}
-              >
-                <Text style={styles.muteText}>{targetIsMuted ? 'Unmute their posts' : 'Mute their posts'}</Text>
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity style={styles.sheetCancelBtn} onPress={() => setReactionTarget(null)}>
-              <Text style={styles.sheetCancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+            }}
+          />
+          <TouchableOpacity
+            style={[styles.createBtn, (!newGroupName.trim() || selectedMemberIds.size === 0) && styles.createBtnDisabled]}
+            onPress={createGroup}
+            disabled={creatingGroup || !newGroupName.trim() || selectedMemberIds.size === 0}
+          >
+            {creatingGroup ? <ActivityIndicator color="#fff" /> : <Text style={styles.createBtnText}>Create Group</Text>}
+          </TouchableOpacity>
         </View>
       </Modal>
     </SafeAreaView>
@@ -762,56 +322,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 16, marginBottom: 12 },
   title: { fontSize: 24, fontWeight: '800', color: colors.text },
-  notifBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border },
-  notifIcon: { fontSize: 14 },
-  notifText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
-  tabs: { flexDirection: 'row', paddingHorizontal: 20, gap: 8, marginBottom: 12 },
-  tab: { flex: 1, paddingVertical: 9, borderRadius: 20, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border, alignItems: 'center' },
-  tabActive: { backgroundColor: colors.sage, borderColor: colors.sage },
-  tabText: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
-  tabTextActive: { color: '#fff' },
-  postList: { paddingHorizontal: 16, paddingBottom: 8 },
-  postRow: { marginBottom: 8 },
-  postRowOwn: { alignItems: 'flex-end' },
-  postRowOther: { alignItems: 'flex-start' },
-  bubble: { maxWidth: '82%', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10 },
-  bubbleOther: { backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.borderLight },
-  bubbleOwn: { backgroundColor: colors.sage },
-  bubbleFamily: { fontSize: 11, fontWeight: '700', color: colors.sageDark, marginBottom: 3 },
-  bubbleFamilyOwn: { color: 'rgba(255,255,255,0.75)' },
-  bubbleText: { fontSize: 15, color: colors.text, lineHeight: 21 },
-  bubbleTextOwn: { color: '#fff' },
-  bubbleTime: { fontSize: 10, color: colors.textMuted, marginTop: 4, textAlign: 'right' },
-  bubbleTimeOwn: { color: 'rgba(255,255,255,0.6)' },
-  mention: { fontWeight: '700' },
-  mentionOther: { color: colors.sageDark },
-  mentionOwn: { color: 'rgba(255,255,255,0.95)' },
-  mentionMe: { color: colors.primary },
-  mentionMeOwn: { color: '#fff', textDecorationLine: 'underline' },
-  tag: { fontWeight: '700', textDecorationLine: 'underline' },
-  tagOther: { color: colors.primary },
-  tagOwn: { color: '#fff' },
-  reactionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 8 },
-  reactionPill: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.08)', borderRadius: 14,
-    paddingHorizontal: 10, paddingVertical: 5,
-  },
-  reactionPillMine: { backgroundColor: colors.primaryLight, borderWidth: 1.5, borderColor: colors.primary },
-  reactionPillText: { fontSize: 17, fontWeight: '600', color: colors.text },
-  mentionDropdown: { borderTopWidth: 1, borderTopColor: colors.borderLight, backgroundColor: colors.card },
-  mentionItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  mentionItemEmoji: { fontSize: 18 },
-  mentionItemName: { fontSize: 15, fontWeight: '600', color: colors.text },
-  composerHint: {
-    fontSize: 11, color: colors.textMuted, fontWeight: '500',
-    textAlign: 'center', paddingVertical: 4, backgroundColor: colors.card,
-  },
-  inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.borderLight, backgroundColor: colors.card },
-  input: { flex: 1, backgroundColor: colors.background, borderWidth: 1.5, borderColor: colors.border, borderRadius: 22, paddingHorizontal: 16, paddingVertical: 10, fontSize: 15, color: colors.text, maxHeight: 100 },
-  sendBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.sage, alignItems: 'center', justifyContent: 'center' },
-  sendBtnDisabled: { backgroundColor: colors.border },
-  sendIcon: { fontSize: 18, color: '#fff', fontWeight: '800' },
   dmList: { paddingHorizontal: 20, paddingTop: 4 },
   dmRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 8, borderWidth: 1.5, borderColor: colors.borderLight },
   dmAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.sageLight, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
@@ -826,34 +336,41 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyIcon: { fontSize: 40, marginBottom: 10 },
   emptyText: { fontSize: 15, color: colors.textMuted, fontWeight: '500', textAlign: 'center' },
-
+  emptyActionBtn: { backgroundColor: colors.primary, borderRadius: 14, paddingHorizontal: 20, paddingVertical: 12, marginTop: 16 },
+  emptyActionBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   unlinkBanner: {
-    backgroundColor: '#FFF3CD', borderRadius: 12, marginHorizontal: 16,
-    marginBottom: 10, padding: 12, borderWidth: 1, borderColor: '#FFCC00',
+    backgroundColor: colors.amberLight, borderRadius: 12, marginHorizontal: 16,
+    marginBottom: 10, padding: 12, borderWidth: 1, borderColor: colors.amber,
   },
-  unlinkText: { fontSize: 13, color: '#7A5F00', lineHeight: 18, fontWeight: '500' },
+  unlinkText: { fontSize: 13, color: colors.amber, lineHeight: 18, fontWeight: '500' },
 
-  // Reaction sheet
+  newGroupBtn: { backgroundColor: colors.primary, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8 },
+  newGroupBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  groupsSection: { marginBottom: 8 },
+  sectionLabel: { fontSize: 12, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 },
+
   sheetBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
-  reactionSheet: {
-    backgroundColor: colors.card,
-    borderTopLeftRadius: 28, borderTopRightRadius: 28,
-    paddingHorizontal: 20, paddingBottom: 44,
+  createSheet: {
+    backgroundColor: colors.card, borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    paddingHorizontal: 20, paddingBottom: 32, maxHeight: '80%',
   },
   sheetHandle: { width: 40, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 8 },
-  sheetHint: { fontSize: 12, color: colors.textMuted, textAlign: 'center', marginBottom: 16, fontWeight: '500' },
-  emojiRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 20 },
-  emojiBtn: {
-    width: 48, height: 48, borderRadius: 24,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: colors.background,
+  createTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: 14, textAlign: 'center' },
+  createNameInput: {
+    backgroundColor: colors.background, borderWidth: 1.5, borderColor: colors.border,
+    borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, fontSize: 15, color: colors.text, marginBottom: 16,
   },
-  emojiBtnActive: { backgroundColor: colors.primaryLight, borderWidth: 2, borderColor: colors.primary },
-  emojiChar: { fontSize: 28 },
-  sheetActions: { borderTopWidth: 1, borderTopColor: colors.borderLight },
-  sheetActionBtn: { paddingVertical: 16, alignItems: 'center' },
-  deleteText: { fontSize: 16, fontWeight: '700', color: colors.red },
-  muteText: { fontSize: 16, fontWeight: '600', color: colors.textSecondary },
-  sheetCancelBtn: { paddingVertical: 12, alignItems: 'center' },
-  sheetCancelText: { fontSize: 15, color: colors.textMuted, fontWeight: '500' },
+  createSubLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary, marginBottom: 8 },
+  createMemberList: { maxHeight: 260, marginBottom: 16 },
+  memberPickRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+  memberPickName: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.text },
+  checkbox: {
+    width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.border,
+    backgroundColor: colors.background, alignItems: 'center', justifyContent: 'center',
+  },
+  checkboxChecked: { backgroundColor: colors.primary, borderColor: colors.primary },
+  checkmark: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  createBtn: { backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 15, alignItems: 'center' },
+  createBtnDisabled: { backgroundColor: colors.border },
+  createBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
 });

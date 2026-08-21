@@ -30,21 +30,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { data } = await supabase
       .from('families')
       .select('*')
-      .or(`user_id.eq.${userId},partner_user_id.eq.${userId}`)
+      .eq('user_id', userId)
       .single();
 
     if (data && data.is_active === false) {
       setFamily(null);
-      Alert.alert('Account removed', 'An admin has removed your household from VillageMates.');
+      Alert.alert('Account removed', 'An admin has removed your profile from VillageMates.');
       await supabase.auth.signOut();
       return;
     }
 
     setFamily(data ?? null);
-    if (data) {
-      const isPartner = data.partner_user_id === userId;
-      registerForPushNotifications(data.id, isPartner);
-    }
+    if (data) registerForPushNotifications(data.id);
   }
 
   async function refreshFamily() {

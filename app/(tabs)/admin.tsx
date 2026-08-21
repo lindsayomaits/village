@@ -1,18 +1,29 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, ActivityIndicator, Alert, TextInput, Modal,
 } from 'react-native';
 import { Text } from '../../components/Text';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import type { Family, Invite, Report } from '../../types';
 
 export default function AdminScreen() {
-  const { family: adminFamily } = useAuth();
+  const { family: adminFamily, loading: authLoading, refreshFamily } = useAuth();
+  const router = useRouter();
+
+  // The tab bar already hides the Admin button from non-admins, but the
+  // route itself is still reachable directly (deep link, stale nav state,
+  // typed URL) — this is the actual gate. RLS blocks non-admins from the
+  // underlying data regardless, but they should never see this screen's
+  // shell in the first place.
+  useEffect(() => {
+    if (!authLoading && !adminFamily?.is_admin) router.replace('/(tabs)/');
+  }, [authLoading, adminFamily?.is_admin]);
+
   const [families, setFamilies] = useState<Family[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
@@ -78,7 +89,7 @@ export default function AdminScreen() {
     if (newBalance < -20) return Alert.alert('This would bring the household below -20h');
 
     setAdjusting(true);
-    const { error } = await supabase.rpc('admin_adjust_balance', {
+    const { data: confirmedBalance, error } = await supabase.rpc('admin_adjust_balance', {
       p_family_id: selectedFamily.id,
       p_hours: hours,
       p_note: adjustNote.trim() || null,
@@ -87,7 +98,15 @@ export default function AdminScreen() {
     setAdjusting(false);
     if (error) return Alert.alert('Error', error.message);
     setAdjustModal(false);
-    loadData();
+    // The adjustment can target the admin's own household — this list is a
+    // separate fetch from the auth context's `family`, so without this the
+    // change is live in the DB but every other screen (home balance, etc.)
+    // keeps showing the pre-adjustment number until something else happens
+    // to trigger a refetch.
+    await Promise.all([loadData(), refreshFamily()]);
+    // Show the balance the RPC actually wrote, not a client-computed guess —
+    // confirms the write landed instead of trusting a silent success.
+    Alert.alert('Balance updated', `${selectedFamily.name}'s balance is now ${confirmedBalance}h.`);
   }
 
   async function removeFamily(f: Family) {
@@ -140,6 +159,8 @@ export default function AdminScreen() {
     </View>
   );
 
+  if (authLoading || !adminFamily?.is_admin) return null;
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <Text style={styles.title}>Admin</Text>
@@ -190,7 +211,7 @@ export default function AdminScreen() {
       )}
 
       <Text style={[styles.sectionLabel, { paddingHorizontal: 20, marginBottom: 10 }]}>
-        Households ({families.length})
+        Profiles ({families.length})
       </Text>
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />

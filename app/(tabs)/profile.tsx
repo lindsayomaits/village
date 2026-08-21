@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Text } from '../../components/Text';
+import { Avatar } from '../../components/Avatar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../../lib/auth';
@@ -12,22 +13,24 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal, ANIMALS } from '../../lib/animals';
 import { calcAge } from '../../lib/utils';
-import type { KidEntry, Block } from '../../types';
+import { pickAndUploadAvatar, removeAvatar } from '../../lib/photos';
+import { notifyFamily } from '../../lib/notifications';
+import type { KidEntry, PetEntry, Block, Partnership, Family } from '../../types';
+
+const PET_SIZES = ['Small', 'Medium', 'Large'] as const;
 
 export default function ProfileScreen() {
-  const { family, session, signOut, refreshFamily } = useAuth();
+  const { family, signOut, refreshFamily } = useAuth();
   const router = useRouter();
 
   const [name, setName] = useState('');
   const [parent1Name, setParent1Name] = useState('');
   const [parent1Phone, setParent1Phone] = useState('');
-  const [parent2Name, setParent2Name] = useState('');
-  const [parent2Phone, setParent2Phone] = useState('');
   const [address, setAddress] = useState('');
   const [emergencyContact, setEmergencyContact] = useState('');
-  const [kidsInfo, setKidsInfo] = useState('');
   const [chosenAnimal, setChosenAnimal] = useState<string | null>(null);
   const [kids, setKids] = useState<KidEntry[]>([]);
+  const [pets, setPets] = useState<PetEntry[]>([]);
   const [servicesOffered, setServicesOffered] = useState<string[]>([]);
   const [pickerIndex, setPickerIndex] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -36,6 +39,26 @@ export default function ProfileScreen() {
   const [togglingDiscoverable, setTogglingDiscoverable] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [blockedHouseholds, setBlockedHouseholds] = useState<Block[]>([]);
+  const [partnership, setPartnership] = useState<Partnership | null>(null);
+  const [partner, setPartner] = useState<Family | null>(null);
+  const [unlinking, setUnlinking] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+  async function handleChangePhoto() {
+    if (!family) return;
+    setUploadingPhoto(true);
+    const url = await pickAndUploadAvatar(family.id);
+    setUploadingPhoto(false);
+    if (url) await refreshFamily();
+  }
+
+  async function handleRemovePhoto() {
+    if (!family) return;
+    setUploadingPhoto(true);
+    const ok = await removeAvatar(family.id);
+    setUploadingPhoto(false);
+    if (ok) await refreshFamily();
+  }
 
   async function loadBlocked() {
     if (!family) return;
@@ -60,23 +83,56 @@ export default function ProfileScreen() {
     setBlockedHouseholds(prev => prev.filter(b => b.id !== blockId));
   }
 
+  async function loadPartnership() {
+    if (!family) { setPartnership(null); setPartner(null); return; }
+    const { data } = await supabase
+      .from('partnerships')
+      .select('*')
+      .or(`profile_a_id.eq.${family.id},profile_b_id.eq.${family.id}`)
+      .maybeSingle();
+    if (!data) { setPartnership(null); setPartner(null); return; }
+    setPartnership(data);
+    const partnerId = data.profile_a_id === family.id ? data.profile_b_id : data.profile_a_id;
+    const { data: partnerRow } = await supabase.from('families').select('*').eq('id', partnerId).single();
+    setPartner(partnerRow ?? null);
+  }
+
+  async function unlinkPartner() {
+    if (!partnership) return;
+    Alert.alert('Unlink from partner?', `You and ${partner?.name ?? 'your partner'} will each keep your own profiles — this just removes the link between them.`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Unlink', style: 'destructive', onPress: async () => {
+          setUnlinking(true);
+          const { error } = await supabase.rpc('leave_partnership', { p_partnership_id: partnership.id });
+          setUnlinking(false);
+          if (error) return Alert.alert('Error', error.message);
+          if (partner) await notifyFamily(partner.id, '💔 Partner unlinked', `${family?.name ?? 'Your partner'} unlinked from you — you each keep your own profile and balance.`, { path: '/(tabs)/profile' });
+          await loadPartnership();
+        },
+      },
+    ]);
+  }
+
   useFocusEffect(useCallback(() => {
     loadBlocked();
-    if (family) {
+    loadPartnership();
+    // Refocusing this tab used to always overwrite the form from server
+    // state, silently discarding anything typed but not yet saved (e.g.
+    // add a kid, switch tabs, come back — the kid was gone). Only load
+    // from `family` when there's nothing unsaved to protect.
+    if (family && !dirty) {
       setName(family.name ?? '');
       setParent1Name(family.parent1_name ?? '');
       setParent1Phone(family.parent1_phone ?? '');
-      setParent2Name(family.parent2_name ?? '');
-      setParent2Phone(family.parent2_phone ?? '');
       setAddress(family.address ?? '');
       setEmergencyContact(family.emergency_contact ?? '');
-      setKidsInfo(family.kids_info ?? '');
       setKids(family.kids_data ?? []);
+      setPets(family.pets_data ?? []);
       setChosenAnimal(family.animal ?? null);
       setServicesOffered(family.services_offered ?? []);
-      setDirty(false);
     }
-  }, [family?.id]));
+  }, [family?.id, dirty]));
 
   function field(setter: (v: string) => void) {
     return (v: string) => { setter(v); setDirty(true); };
@@ -116,16 +172,13 @@ export default function ProfileScreen() {
   }
 
   function handleDeleteAccount() {
-    const isPartner = !!family && session?.user.id === family.partner_user_id;
     Alert.alert(
-      isPartner ? 'Leave this household?' : 'Delete your account?',
-      isPartner
-        ? "This unlinks your login from the household. The household itself, and its other parent's access, are unaffected."
-        : 'This permanently removes your personal info (name, phone, address, kids notes) and signs you out. Past chat and transaction history stays, since other households rely on it, but without your personal details attached.\n\nThis cannot be undone.',
+      'Delete your account?',
+      'This permanently removes your personal info (name, phone, address, kids notes), unlinks any partner, and signs you out. Past chat and transaction history stays, since other people rely on it, but without your personal details attached.\n\nThis cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: isPartner ? 'Leave' : 'Delete My Account', style: 'destructive',
+          text: 'Delete My Account', style: 'destructive',
           onPress: async () => {
             setDeletingAccount(true);
             const { error } = await supabase.rpc('delete_own_account');
@@ -140,7 +193,7 @@ export default function ProfileScreen() {
 
   async function handleSave() {
     if (!family) return;
-    if (!name.trim()) return Alert.alert('Household name is required');
+    if (!name.trim()) return Alert.alert('Name is required');
     setSaving(true);
     const { error } = await supabase
       .from('families')
@@ -148,13 +201,13 @@ export default function ProfileScreen() {
         name: name.trim(),
         parent1_name: parent1Name.trim() || null,
         parent1_phone: parent1Phone.trim() || null,
-        parent2_name: parent2Name.trim() || null,
-        parent2_phone: parent2Phone.trim() || null,
         address: address.trim() || null,
         emergency_contact: emergencyContact.trim() || null,
-        kids_info: kidsInfo.trim() || null,
         kids_data: kids.filter(k => k.name.trim()).length > 0
-          ? kids.filter(k => k.name.trim()).map(k => ({ name: k.name.trim(), birthday: k.birthday }))
+          ? kids.filter(k => k.name.trim()).map(k => ({ name: k.name.trim(), birthday: k.birthday, notes: k.notes?.trim() || null }))
+          : null,
+        pets_data: pets.filter(p => p.name.trim()).length > 0
+          ? pets.filter(p => p.name.trim()).map(p => ({ name: p.name.trim(), animal: p.animal.trim(), size: p.size, notes: p.notes?.trim() || null }))
           : null,
         animal: chosenAnimal || null,
         services_offered: servicesOffered.length > 0 ? servicesOffered : null,
@@ -176,22 +229,31 @@ export default function ProfileScreen() {
           {!family && (
             <View style={styles.unlinkBanner}>
               <Text style={styles.unlinkText}>
-                ⚠️ Your account isn't linked to a household. If you're a partner, ask the primary account holder to go to Profile → Partner Access and re-send the partner invite code. Sign out and sign up again using that code.
+                ⚠️ We couldn't find your profile. Try signing out and back in — if this keeps happening, contact support.
               </Text>
             </View>
           )}
 
           <View style={styles.animalCard}>
-            <Text style={styles.animalEmoji}>
-              {family ? getFamilyAnimal(family.id, chosenAnimal) : ''}
-            </Text>
+            <TouchableOpacity onPress={handleChangePhoto} disabled={uploadingPhoto || !family}>
+              <Avatar familyId={family?.id ?? ''} animal={chosenAnimal} photoUrl={family?.photo_url} size={56} />
+              <View style={styles.photoEditBadge}>
+                {uploadingPhoto ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.photoEditBadgeText}>✏️</Text>}
+              </View>
+            </TouchableOpacity>
             <View style={{ flex: 1 }}>
-              <Text style={styles.animalLabel}>Your village animal</Text>
+              <Text style={styles.animalLabel}>{family?.photo_url ? 'Tap to change photo' : 'Add a profile photo'}</Text>
               <Text style={styles.emailValue}>{family?.email}</Text>
+              {family?.photo_url && (
+                <TouchableOpacity onPress={handleRemovePhoto} disabled={uploadingPhoto}>
+                  <Text style={styles.removePhotoText}>Remove photo</Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
 
-          <Text style={styles.sectionHead}>Choose your animal</Text>
+          <Text style={styles.sectionHead}>{family?.photo_url ? 'Fallback animal' : 'Choose your animal'}</Text>
+          <Text style={styles.hint}>Shown when you don't have a photo set.</Text>
           <View style={styles.animalGrid}>
             {ANIMALS.map((a) => {
               const isSelected = (chosenAnimal ?? getFamilyAnimal(family?.id ?? '', null)) === a;
@@ -207,29 +269,17 @@ export default function ProfileScreen() {
             })}
           </View>
 
-          {/* Household name */}
-          <Text style={styles.sectionHead}>Household</Text>
-          <Text style={styles.label}>Household name <Text style={styles.required}>*</Text></Text>
+          {/* Display name */}
+          <Text style={styles.sectionHead}>Your Profile</Text>
+          <Text style={styles.label}>Display name <Text style={styles.required}>*</Text></Text>
           <TextInput style={styles.input} value={name} onChangeText={field(setName)}
-            placeholder="e.g. The Smith Household" placeholderTextColor={colors.textMuted} />
-
-          {/* Parent 1 */}
-          <Text style={styles.sectionHead}>Adult 1</Text>
-          <Text style={styles.label}>Name</Text>
+            placeholder="e.g. The Smith Family" placeholderTextColor={colors.textMuted} />
+          <Text style={styles.label}>Your name</Text>
           <TextInput style={styles.input} value={parent1Name} onChangeText={field(setParent1Name)}
             placeholder="e.g. Sarah Smith" placeholderTextColor={colors.textMuted} />
           <Text style={styles.label}>Phone</Text>
           <TextInput style={styles.input} value={parent1Phone} onChangeText={field(setParent1Phone)}
             placeholder="e.g. (555) 123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" />
-
-          {/* Parent 2 */}
-          <Text style={styles.sectionHead}>Adult 2</Text>
-          <Text style={styles.label}>Name</Text>
-          <TextInput style={styles.input} value={parent2Name} onChangeText={field(setParent2Name)}
-            placeholder="e.g. Tom Smith" placeholderTextColor={colors.textMuted} />
-          <Text style={styles.label}>Phone</Text>
-          <TextInput style={styles.input} value={parent2Phone} onChangeText={field(setParent2Phone)}
-            placeholder="e.g. (555) 987-6543" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" />
 
           {/* Address & Emergency */}
           <Text style={styles.sectionHead}>Contact Details</Text>
@@ -243,7 +293,15 @@ export default function ProfileScreen() {
 
           {/* Kids */}
           <Text style={styles.sectionHead}>Kids</Text>
-          <Text style={styles.hint}>Add each child — their name and birthday will show as their age to other families.</Text>
+          {kids.length === 0 && (
+            <TouchableOpacity style={styles.addKidBtn} onPress={() => { setKids([{ name: '', birthday: null, notes: null }]); setDirty(true); }}>
+              <Text style={styles.addKidBtnText}>+ Add Kids</Text>
+            </TouchableOpacity>
+          )}
+
+          {kids.length > 0 && (
+            <Text style={styles.hint}>Add each child — their name and birthday will show as their age to other families.</Text>
+          )}
 
           {kids.map((kid, i) => (
             <View key={i} style={styles.kidCard}>
@@ -294,24 +352,90 @@ export default function ProfileScreen() {
                   )}
                 </View>
               )}
+              <Text style={styles.careNotesLabel}>Care notes</Text>
+              <TextInput
+                style={[styles.input, styles.textArea]}
+                value={kid.notes ?? ''}
+                onChangeText={v => { setKids(prev => prev.map((k, j) => j === i ? { ...k, notes: v } : k)); setDirty(true); }}
+                placeholder="Allergies, bedtime, anything a sitter should know"
+                placeholderTextColor={colors.textMuted}
+                multiline numberOfLines={2} textAlignVertical="top"
+              />
             </View>
           ))}
 
-          <TouchableOpacity style={styles.addKidBtn} onPress={() => { setKids(prev => [...prev, { name: '', birthday: null }]); setDirty(true); }}>
-            <Text style={styles.addKidBtnText}>+ Add a child</Text>
-          </TouchableOpacity>
+          {kids.length > 0 && (
+            <TouchableOpacity style={styles.addKidBtn} onPress={() => { setKids(prev => [...prev, { name: '', birthday: null, notes: null }]); setDirty(true); }}>
+              <Text style={styles.addKidBtnText}>+ Add another child</Text>
+            </TouchableOpacity>
+          )}
 
-          <Text style={styles.label}>Sitter notes</Text>
-          <Text style={styles.hint}>Allergies, bedtime, anything else a sitter should know.</Text>
-          <TextInput
-            style={[styles.input, styles.textArea]} value={kidsInfo} onChangeText={field(setKidsInfo)}
-            placeholder="e.g. Mia is allergic to peanuts. Bedtime 8pm for both kids."
-            placeholderTextColor={colors.textMuted} multiline numberOfLines={3} textAlignVertical="top"
-          />
+          {/* Pets */}
+          <Text style={styles.sectionHead}>Pets</Text>
+          {pets.length === 0 && (
+            <TouchableOpacity style={styles.addKidBtn} onPress={() => { setPets([{ name: '', animal: '', size: null, notes: null }]); setDirty(true); }}>
+              <Text style={styles.addKidBtnText}>+ Add Pet</Text>
+            </TouchableOpacity>
+          )}
+
+          {pets.length > 0 && (
+            <Text style={styles.hint}>Add each pet so a sitter knows who they're looking after.</Text>
+          )}
+
+          {pets.map((pet, i) => (
+            <View key={i} style={styles.kidCard}>
+              <View style={styles.kidCardHeader}>
+                <Text style={styles.kidLabel}>Pet {i + 1}</Text>
+                <TouchableOpacity onPress={() => { setPets(prev => prev.filter((_, j) => j !== i)); setDirty(true); }}>
+                  <Text style={styles.removeKidText}>Remove</Text>
+                </TouchableOpacity>
+              </View>
+              <TextInput
+                style={styles.input}
+                value={pet.name}
+                onChangeText={v => { setPets(prev => prev.map((p, j) => j === i ? { ...p, name: v } : p)); setDirty(true); }}
+                placeholder="Pet's name"
+                placeholderTextColor={colors.textMuted}
+              />
+              <TextInput
+                style={styles.input}
+                value={pet.animal}
+                onChangeText={v => { setPets(prev => prev.map((p, j) => j === i ? { ...p, animal: v } : p)); setDirty(true); }}
+                placeholder="e.g. Dog, Cat, Golden Retriever"
+                placeholderTextColor={colors.textMuted}
+              />
+              <View style={styles.segmentRow}>
+                {PET_SIZES.map(size => (
+                  <TouchableOpacity
+                    key={size}
+                    style={[styles.segmentBtn, pet.size === size && styles.segmentBtnActive]}
+                    onPress={() => { setPets(prev => prev.map((p, j) => j === i ? { ...p, size } : p)); setDirty(true); }}
+                  >
+                    <Text style={[styles.segmentText, pet.size === size && styles.segmentTextActive]}>{size}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={styles.careNotesLabel}>Care notes</Text>
+              <TextInput
+                style={[styles.input, styles.textArea]}
+                value={pet.notes ?? ''}
+                onChangeText={v => { setPets(prev => prev.map((p, j) => j === i ? { ...p, notes: v } : p)); setDirty(true); }}
+                placeholder="Feeding instructions, vet info, anything a sitter should know"
+                placeholderTextColor={colors.textMuted}
+                multiline numberOfLines={2} textAlignVertical="top"
+              />
+            </View>
+          ))}
+
+          {pets.length > 0 && (
+            <TouchableOpacity style={styles.addKidBtn} onPress={() => { setPets(prev => [...prev, { name: '', animal: '', size: null, notes: null }]); setDirty(true); }}>
+              <Text style={styles.addKidBtnText}>+ Add another pet</Text>
+            </TouchableOpacity>
+          )}
 
           {/* What I can help with */}
           <Text style={styles.sectionHead}>What I can help with</Text>
-          <Text style={styles.hint}>Other households will see this on your profile when they're looking for help.</Text>
+          <Text style={styles.hint}>Other people will see this on your profile when they're looking for help.</Text>
           {([
             { key: 'kid_sit',           label: 'Kid-sitting',      emoji: '👧' },
             { key: 'dog',               label: 'Pet care',          emoji: '🐾' },
@@ -352,15 +476,20 @@ export default function ProfileScreen() {
             {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnText}>Save Changes</Text>}
           </TouchableOpacity>
 
-          <Text style={styles.sectionHead}>Partner Access</Text>
-          {family?.partner_user_id ? (
+          <Text style={styles.sectionHead}>Your Partner</Text>
+          {partner ? (
             <View style={styles.partnerLinkedCard}>
-              <Text style={styles.partnerLinkedText}>Your partner has joined this household account.</Text>
+              <Text style={styles.partnerLinkedText}>Linked with {partner.name}{partner.parent1_name ? ` (${partner.parent1_name})` : ''} — their own profile, own login, own balance.</Text>
+              <TouchableOpacity onPress={unlinkPartner} disabled={unlinking}>
+                {unlinking
+                  ? <ActivityIndicator color={colors.red} />
+                  : <Text style={styles.unblockText}>Unlink</Text>}
+              </TouchableOpacity>
             </View>
           ) : (
             <>
               <Text style={styles.hint}>
-                Your partner can create their own login tied to your household. Tap below to generate a one-time invite code to send them.
+                Invite your partner to create their own linked profile — their own login, own balance, own kid visibility, just connected to yours. Tap below to generate a one-time invite code to send them.
               </Text>
               <TouchableOpacity
                 style={styles.invitePartnerBtn}
@@ -376,7 +505,7 @@ export default function ProfileScreen() {
 
           <Text style={styles.sectionHead}>Connecting</Text>
           <Text style={styles.hint}>
-            Share your code with a household you know for an instant connection — no searching, no waiting for them to accept.
+            Share your code with someone you know for an instant connection — no searching, no waiting for them to accept.
           </Text>
           <TouchableOpacity style={styles.connectCodeCard} onPress={handleShareConnectCode} disabled={!family?.connect_code}>
             <View>
@@ -403,10 +532,10 @@ export default function ProfileScreen() {
 
           {blockedHouseholds.length > 0 && (
             <>
-              <Text style={styles.sectionHead}>Blocked Households</Text>
+              <Text style={styles.sectionHead}>Blocked People</Text>
               {blockedHouseholds.map(b => (
                 <View key={b.id} style={styles.blockedRow}>
-                  <Text style={styles.blockedName}>{b.blocked?.name ?? 'Household'}</Text>
+                  <Text style={styles.blockedName}>{b.blocked?.name ?? 'Someone'}</Text>
                   <TouchableOpacity onPress={() => unblockHousehold(b.id)}>
                     <Text style={styles.unblockText}>Unblock</Text>
                   </TouchableOpacity>
@@ -436,9 +565,7 @@ export default function ProfileScreen() {
           >
             {deletingAccount
               ? <ActivityIndicator color={colors.red} />
-              : <Text style={styles.deleteAccountText}>
-                  {session?.user.id === family?.partner_user_id ? 'Leave Household' : 'Delete My Account'}
-                </Text>}
+              : <Text style={styles.deleteAccountText}>Delete My Account</Text>}
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -451,10 +578,10 @@ const styles = StyleSheet.create({
   scroll: { paddingHorizontal: 20, paddingBottom: 48 },
   title: { fontSize: 24, fontWeight: '800', color: colors.text, paddingTop: 16, marginBottom: 20 },
   unlinkBanner: {
-    backgroundColor: '#FFF3CD', borderRadius: 12, padding: 14, marginBottom: 16,
-    borderWidth: 1, borderColor: '#FFCC00',
+    backgroundColor: colors.amberLight, borderRadius: 12, padding: 14, marginBottom: 16,
+    borderWidth: 1, borderColor: colors.amber,
   },
-  unlinkText: { fontSize: 13, color: '#7A5F00', lineHeight: 19, fontWeight: '500' },
+  unlinkText: { fontSize: 13, color: colors.amber, lineHeight: 19, fontWeight: '500' },
   animalCard: {
     backgroundColor: colors.card, borderRadius: 14, padding: 16, marginBottom: 8,
     borderWidth: 1.5, borderColor: colors.borderLight,
@@ -462,6 +589,13 @@ const styles = StyleSheet.create({
   },
   animalEmoji: { fontSize: 40 },
   animalLabel: { fontSize: 12, color: colors.textMuted, fontWeight: '600', marginBottom: 4 },
+  photoEditBadge: {
+    position: 'absolute', bottom: -2, right: -2, width: 22, height: 22, borderRadius: 11,
+    backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: colors.card,
+  },
+  photoEditBadgeText: { fontSize: 10 },
+  removePhotoText: { fontSize: 12, color: colors.red, fontWeight: '600', marginTop: 4 },
   animalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
   animalOption: {
     width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center',
@@ -477,6 +611,7 @@ const styles = StyleSheet.create({
   label: { fontSize: 14, fontWeight: '700', color: '#374151', marginBottom: 6, marginTop: 12 },
   required: { color: colors.red },
   hint: { fontSize: 12, color: colors.textMuted, marginBottom: 8, lineHeight: 17 },
+  careNotesLabel: { fontSize: 12, fontWeight: '700', color: colors.textSecondary, marginTop: 10, marginBottom: 4 },
   input: {
     backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border,
     borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14,
@@ -504,6 +639,11 @@ const styles = StyleSheet.create({
     borderRadius: 14, paddingVertical: 14, alignItems: 'center', marginBottom: 4,
   },
   addKidBtnText: { fontSize: 15, color: colors.sage, fontWeight: '700' },
+  segmentRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  segmentBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, borderWidth: 1.5, borderColor: colors.borderLight, backgroundColor: colors.card, alignItems: 'center' },
+  segmentBtnActive: { backgroundColor: colors.sageLight, borderColor: colors.sage },
+  segmentText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+  segmentTextActive: { color: colors.sageDark, fontWeight: '700' },
   saveBtn: {
     backgroundColor: colors.primary, borderRadius: 16, paddingVertical: 17,
     alignItems: 'center', marginTop: 28,

@@ -67,7 +67,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="requests"
         options={{
-          tabBarLabel: 'Posts',
+          tabBarLabel: 'Requests',
           tabBarIcon: ({ focused }) => tabIcon(focused, 'calendar-outline', 'calendar'),
           tabBarBadge: pendingApprovals > 0 ? pendingApprovals : undefined,
           tabBarBadgeStyle: styles.badge,
@@ -76,7 +76,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="chat"
         options={{
-          tabBarLabel: 'Chat',
+          tabBarLabel: 'Messages',
           tabBarIcon: ({ focused }) => tabIcon(focused, 'chatbubbles-outline', 'chatbubbles'),
         }}
       />

@@ -1,16 +1,17 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, ActivityIndicator, Modal, ScrollView, Alert, TextInput, Switch,
 } from 'react-native';
 import { Text } from '../../components/Text';
+import { Avatar } from '../../components/Avatar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
-import { formatPhone, renderKidsInfo, displayKidsData } from '../../lib/utils';
+import { formatPhone, renderKidsInfo, displayKidsData, displayPetsData } from '../../lib/utils';
 import { notifyFamily, notifyAdmins } from '../../lib/notifications';
 import type { Family, Connection } from '../../types';
 
@@ -38,7 +39,9 @@ export default function MembersScreen() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const loadSeq = useRef(0);
   const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<Family | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [connectCode, setConnectCode] = useState('');
@@ -56,6 +59,14 @@ export default function MembersScreen() {
   const [giftLoading, setGiftLoading] = useState(false);
 
   async function loadData() {
+    // loadData fires from many places (focus, refresh, and after every
+    // connect/accept/decline/block action) with no guarantee earlier
+    // calls resolve first. Without this, a slow call triggered first
+    // could land after a fast one triggered later and stomp its result —
+    // the "connections/search results disappear and reappear" bug.
+    // Only the most recently *issued* call is allowed to commit state.
+    const seq = ++loadSeq.current;
+
     // families_public always lists every household (name/animal only) so
     // browsing/discovery works network-wide; families only returns full
     // rows (parent/phone/kids info) for self, admin, or connected
@@ -66,6 +77,9 @@ export default function MembersScreen() {
       supabase.from('connections').select('*').or(`requester_id.eq.${myHousehold?.id},recipient_id.eq.${myHousehold?.id}`),
       supabase.from('blocks').select('blocked_id').eq('blocker_id', myHousehold?.id ?? ''),
     ]);
+
+    if (seq !== loadSeq.current) return;
+
     const fullById = new Map((fullRes.data ?? []).map((f: Family) => [f.id, f]));
     const merged = (publicRes.data ?? []).map((p: Family) => fullById.get(p.id) ?? p);
     setAllHouseholds(merged as Family[]);
@@ -113,7 +127,7 @@ export default function MembersScreen() {
     });
     setReportSubmitting(false);
     if (error) return Alert.alert('Error', error.message);
-    notifyAdmins('🚩 New report', `${myHousehold.name} reported ${reportTarget.name} — ${reportReason}`).catch(() => {});
+    notifyAdmins('🚩 New report', `${myHousehold.name} reported ${reportTarget.name} — ${reportReason}`, { path: '/(tabs)/admin' }).catch(() => {});
     setReportTarget(null);
     Alert.alert('Report submitted', 'Thanks for letting us know — an admin will review this.');
   }
@@ -167,7 +181,7 @@ export default function MembersScreen() {
       return Alert.alert('Error', error.message);
     }
     await loadData();
-    notifyFamily(household.id, '🤝 New connection request', `${myHousehold.name} wants to connect with you`).catch(() => {});
+    notifyFamily(household.id, '🤝 New connection request', `${myHousehold.name} wants to connect with you`, { path: '/(tabs)/members?tab=pending' }).catch(() => {});
     Alert.alert('Request sent!', `${household.name} will be notified.`);
   }
 
@@ -186,12 +200,13 @@ export default function MembersScreen() {
 
   async function acceptConnection(conn: Connection) {
     setActionLoading(true);
-    await supabase.from('connections').update({ status: 'accepted' }).eq('id', conn.id);
+    const { error } = await supabase.from('connections').update({ status: 'accepted' }).eq('id', conn.id);
     setActionLoading(false);
+    if (error) return Alert.alert('Error', error.message);
     await loadData();
     setSelected(null);
     if (myHousehold) {
-      notifyFamily(conn.requester_id, '🎉 Connection accepted', `${myHousehold.name} accepted your connection request`).catch(() => {});
+      notifyFamily(conn.requester_id, '🎉 Connection accepted', `${myHousehold.name} accepted your connection request`, { path: '/(tabs)/members?tab=my_network' }).catch(() => {});
     }
   }
 
@@ -251,7 +266,7 @@ export default function MembersScreen() {
             });
             setGiftLoading(false);
             if (error) return Alert.alert('Error', error.message);
-            await notifyFamily(giftTarget.id, '🎁 You received a gift!', `${myHousehold.name} gifted you ${giftHours}h${giftNote.trim() ? ` — "${giftNote.trim()}"` : ''}`);
+            await notifyFamily(giftTarget.id, '🎁 You received a gift!', `${myHousehold.name} gifted you ${giftHours}h${giftNote.trim() ? ` — "${giftNote.trim()}"` : ''}`, { path: '/(tabs)/profile' });
             setGiftTarget(null);
             Alert.alert('Gift sent! 🎁', `${giftHours}h sent to ${giftTarget.name}.`);
           },
@@ -273,12 +288,13 @@ export default function MembersScreen() {
   );
 
   const searchLower = search.trim().toLowerCase();
-  const discoverHouseholds = searchLower.length < 2 ? [] : allHouseholds.filter(h => {
+  const discoverHouseholds = (searchLower.length < 2 && !categoryFilter) ? [] : allHouseholds.filter(h => {
     if (h.id === myHousehold?.id) return false;
     if (connectedIds.includes(h.id)) return false;
     if (h.discoverable === false) return false;
     if (blockedIds.has(h.id)) return false;
-    if (!h.name.toLowerCase().includes(searchLower)) return false;
+    if (searchLower.length >= 2 && !h.name.toLowerCase().includes(searchLower)) return false;
+    if (categoryFilter && !(h.services_offered ?? []).includes(categoryFilter)) return false;
     return true;
   });
 
@@ -294,13 +310,11 @@ export default function MembersScreen() {
         style={[styles.card, item.id === myHousehold?.id && styles.cardSelf]}
         onPress={() => setSelected(item)}
       >
-        <Text style={styles.cardAnimal}>{getFamilyAnimal(item.id, item.animal)}</Text>
+        <View style={styles.cardAvatarWrap}><Avatar familyId={item.id} animal={item.animal} photoUrl={item.photo_url} size={40} /></View>
         <View style={styles.cardInfo}>
           <Text style={styles.cardName}>{item.name}</Text>
-          {(item.parent1_name || item.parent2_name) && (
-            <Text style={styles.cardParents}>
-              {[item.parent1_name, item.parent2_name].filter(Boolean).join(' & ')}
-            </Text>
+          {item.parent1_name && (
+            <Text style={styles.cardParents}>{item.parent1_name}</Text>
           )}
         </View>
         {status === 'connected' && (
@@ -320,7 +334,7 @@ export default function MembersScreen() {
   function renderPendingCard({ item }: { item: { household: Family; conn: Connection } }) {
     return (
       <View style={styles.pendingCard}>
-        <Text style={styles.cardAnimal}>{getFamilyAnimal(item.household.id, item.household.animal)}</Text>
+        <View style={styles.cardAvatarWrap}><Avatar familyId={item.household.id} animal={item.household.animal} photoUrl={item.household.photo_url} size={40} /></View>
         <View style={styles.cardInfo}>
           <Text style={styles.cardName}>{item.household.name}</Text>
           <Text style={styles.cardParents}>Wants to connect with you</Text>
@@ -349,9 +363,9 @@ export default function MembersScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.headerRow}>
         <View>
-          <Text style={styles.title}>Households</Text>
+          <Text style={styles.title}>Your Village</Text>
           <Text style={styles.subtitle}>
-            {networkHouseholds.length} {networkHouseholds.length === 1 ? 'household' : 'households'} in your network
+            {networkHouseholds.length} {networkHouseholds.length === 1 ? 'person' : 'people'} in your network
           </Text>
         </View>
       </View>
@@ -412,12 +426,24 @@ export default function MembersScreen() {
               <View style={styles.searchRow}>
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="Search by household name..."
+                  placeholder="Search by name..."
                   placeholderTextColor={colors.textMuted}
                   value={search}
                   onChangeText={setSearch}
                   clearButtonMode="while-editing"
                 />
+              </View>
+              <Text style={styles.orDivider}>or browse who's open to help with</Text>
+              <View style={styles.categoryFilterRow}>
+                {Object.entries(CATEGORY_LABELS).map(([key, { emoji, label }]) => (
+                  <TouchableOpacity
+                    key={key}
+                    style={[styles.categoryChip, categoryFilter === key && styles.categoryChipActive]}
+                    onPress={() => setCategoryFilter(prev => prev === key ? null : key)}
+                  >
+                    <Text style={[styles.categoryChipText, categoryFilter === key && styles.categoryChipTextActive]}>{emoji} {label}</Text>
+                  </TouchableOpacity>
+                ))}
               </View>
             </>
           )}
@@ -427,7 +453,7 @@ export default function MembersScreen() {
               <View style={styles.empty}>
                 <Text style={styles.emptyEmoji}>🤝</Text>
                 <Text style={styles.emptyTitle}>No connections yet</Text>
-                <Text style={styles.emptyText}>Go to "Find People" to connect with households you know and trust.</Text>
+                <Text style={styles.emptyText}>Go to "Find People" to connect with people you know and trust.</Text>
               </View>
             ) : (
               <FlatList
@@ -444,11 +470,11 @@ export default function MembersScreen() {
             discoverHouseholds.length === 0 ? (
               <View style={styles.empty}>
                 <Text style={styles.emptyEmoji}>🔍</Text>
-                <Text style={styles.emptyTitle}>{searchLower.length >= 2 ? 'No results' : 'Know someone already?'}</Text>
+                <Text style={styles.emptyTitle}>{searchLower.length >= 2 || categoryFilter ? 'No results' : 'Know someone already?'}</Text>
                 <Text style={styles.emptyText}>
-                  {searchLower.length >= 2
-                    ? 'Try a different name.'
-                    : 'Ask for their connect code above, or type at least 2 letters of a household name to search.'}
+                  {searchLower.length >= 2 || categoryFilter
+                    ? 'Try a different name or category.'
+                    : 'Ask for their connect code above, search by name, or browse by what people are open to helping with.'}
                 </Text>
               </View>
             ) : (
@@ -467,7 +493,7 @@ export default function MembersScreen() {
               <View style={styles.empty}>
                 <Text style={styles.emptyEmoji}>📬</Text>
                 <Text style={styles.emptyTitle}>No pending requests</Text>
-                <Text style={styles.emptyText}>Connection requests from other households will appear here.</Text>
+                <Text style={styles.emptyText}>Connection requests from other people will appear here.</Text>
               </View>
             ) : (
               <FlatList
@@ -497,12 +523,12 @@ export default function MembersScreen() {
             const conn = getConnection(selected.id);
             return (
               <ScrollView bounces={false} contentContainerStyle={styles.sheetContent}>
-                <Text style={styles.sheetAnimal}>{getFamilyAnimal(selected.id, selected.animal)}</Text>
+                <Avatar familyId={selected.id} animal={selected.animal} photoUrl={selected.photo_url} size={80} style={{ marginTop: 8, marginBottom: 8 }} />
                 <Text style={styles.sheetName}>{selected.name}</Text>
 
                 {(selected.parent1_name || selected.parent1_phone) && (
                   <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Adult 1</Text>
+                    <Text style={styles.infoLabel}>Contact</Text>
                     <View style={styles.infoRight}>
                       {selected.parent1_name && <Text style={styles.infoValue}>{selected.parent1_name}</Text>}
                       {selected.parent1_phone && <Text style={styles.infoSub}>{formatPhone(selected.parent1_phone)}</Text>}
@@ -510,33 +536,33 @@ export default function MembersScreen() {
                   </View>
                 )}
 
-                {(selected.parent2_name || selected.parent2_phone) && (
+                {selected.kids_data && selected.kids_data.length > 0 && (
                   <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Adult 2</Text>
-                    <View style={styles.infoRight}>
-                      {selected.parent2_name && <Text style={styles.infoValue}>{selected.parent2_name}</Text>}
-                      {selected.parent2_phone && <Text style={styles.infoSub}>{formatPhone(selected.parent2_phone)}</Text>}
+                    <Text style={styles.infoLabel}>Kids</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.infoValue}>{displayKidsData(selected.kids_data)}</Text>
+                      {selected.kids_data.filter(k => k.notes?.trim()).map((k, i) => (
+                        <Text key={i} style={styles.careNoteText}>{k.name}: {renderKidsInfo(k.notes)}</Text>
+                      ))}
                     </View>
                   </View>
                 )}
 
-                {selected.kids_data && selected.kids_data.length > 0 && (
+                {selected.pets_data && selected.pets_data.length > 0 && (
                   <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Kids</Text>
-                    <Text style={[styles.infoValue, { flex: 1 }]}>{displayKidsData(selected.kids_data)}</Text>
-                  </View>
-                )}
-
-                {selected.kids_info && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>{selected.kids_data?.length ? 'Notes' : 'Kids'}</Text>
-                    <Text style={[styles.infoValue, { flex: 1 }]}>{renderKidsInfo(selected.kids_info)}</Text>
+                    <Text style={styles.infoLabel}>Pets</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.infoValue}>{displayPetsData(selected.pets_data)}</Text>
+                      {selected.pets_data.filter(p => p.notes?.trim()).map((p, i) => (
+                        <Text key={i} style={styles.careNoteText}>{p.name}: {renderKidsInfo(p.notes)}</Text>
+                      ))}
+                    </View>
                   </View>
                 )}
 
                 {status !== 'connected' && selected.id !== myHousehold?.id &&
-                  !selected.parent1_name && !selected.parent2_name && !selected.kids_info && !selected.kids_data?.length && (
-                  <Text style={styles.connectHint}>Connect with this household to see contact info.</Text>
+                  !selected.parent1_name && !selected.kids_data?.length && !selected.pets_data?.length && (
+                  <Text style={styles.connectHint}>Connect with them to see contact info.</Text>
                 )}
 
                 {selected.services_offered && selected.services_offered.length > 0 && (
@@ -565,6 +591,12 @@ export default function MembersScreen() {
                           onPress={() => { setSelected(null); router.push(`/dm/${selected.id}`); }}
                         >
                           <Text style={styles.messageBtnText}>Send a Message</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.messageBtn}
+                          onPress={() => { setSelected(null); router.push({ pathname: '/new-request', params: { targetId: selected.id } }); }}
+                        >
+                          <Text style={styles.messageBtnText}>🙋 Request Help Directly</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={styles.giftBtn}
@@ -815,6 +847,7 @@ const styles = StyleSheet.create({
   },
   cardSelf: { borderColor: colors.sage },
   cardAnimal: { fontSize: 32, marginRight: 12 },
+  cardAvatarWrap: { marginRight: 12 },
   cardInfo: { flex: 1 },
   cardName: { fontSize: 15, fontWeight: '700', color: colors.text },
   cardParents: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
@@ -862,11 +895,21 @@ const styles = StyleSheet.create({
   infoLabel: { fontSize: 12, fontWeight: '800', color: colors.sage, textTransform: 'uppercase', letterSpacing: 0.6, width: 72, paddingTop: 2 },
   infoRight: { flex: 1 },
   infoValue: { fontSize: 15, color: colors.text, fontWeight: '600' },
+  careNoteText: { fontSize: 12, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
   infoSub: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
 
   serviceChips: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   serviceChip: { backgroundColor: colors.sageLight, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: colors.sage },
   serviceChipText: { fontSize: 13, color: colors.sageDark, fontWeight: '600' },
+
+  categoryFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
+  categoryChip: {
+    backgroundColor: colors.card, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 7,
+    borderWidth: 1.5, borderColor: colors.borderLight,
+  },
+  categoryChipActive: { backgroundColor: colors.sageLight, borderColor: colors.sage },
+  categoryChipText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
+  categoryChipTextActive: { color: colors.sageDark },
 
   actionButtons: { width: '100%', gap: 10, marginTop: 16 },
   messageBtn: {

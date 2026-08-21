@@ -30,8 +30,8 @@ export default function SignupScreen() {
     if (!email || !password) return Alert.alert('Please fill in all fields');
     if (!isValidEmail(email)) return Alert.alert('Invalid email', 'Please enter a valid email address.');
     if (password.length < 6) return Alert.alert('Password too short', 'Password must be at least 6 characters.');
-    if (mode === 'new_household' && !householdName) return Alert.alert('Please enter your household name');
-    if (mode === 'partner' && !partnerCode) return Alert.alert('Please enter the partner code from your household');
+    if (mode === 'new_household' && !householdName) return Alert.alert('Please enter your display name');
+    if (mode === 'partner' && !partnerCode) return Alert.alert('Please enter the partner code your partner sent you');
     setLoading(true);
 
     if (mode === 'new_household') {
@@ -61,7 +61,7 @@ export default function SignupScreen() {
     if (householdError) {
       return Alert.alert(
         'Almost there',
-        `Your account was created, but setting up your household didn't go through (${householdError.message}). This is usually a connection hiccup.`,
+        `Your account was created, but setting up your profile didn't go through (${householdError.message}). This is usually a connection hiccup.`,
         [
           { text: 'Retry', onPress: () => createHousehold(userId) },
           { text: 'Cancel', style: 'cancel' },
@@ -69,7 +69,7 @@ export default function SignupScreen() {
       );
     }
 
-    Alert.alert('Welcome to VillageMates!', 'You start with 10 hours. Connect with households you know to get started.', [
+    Alert.alert('Welcome to VillageMates!', 'You start with 10 hours. Connect with people you know to get started.', [
       { text: "Let's go!", onPress: () => router.replace('/(tabs)/') },
     ]);
   }
@@ -88,7 +88,7 @@ export default function SignupScreen() {
       return Alert.alert('Invalid partner code', 'Please check the code and try again. Make sure your partner sent you a partner invite from the app.');
     }
 
-    Alert.alert("You're in!", "You've been added to your partner's household account.", [
+    Alert.alert("You're in!", "Your profile is linked to your partner's — you each keep your own login and balance.", [
       { text: "Let's go!", onPress: () => router.replace('/(tabs)/') },
     ]);
   }
@@ -106,7 +106,7 @@ export default function SignupScreen() {
             onPress={() => setMode('new_household')}
           >
             <Text style={[styles.toggleText, mode === 'new_household' && styles.toggleTextActive]}>
-              New household
+              New profile
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -121,16 +121,16 @@ export default function SignupScreen() {
 
         <Text style={styles.subtitle}>
           {mode === 'new_household'
-            ? 'Create your household, then connect with people you know and trust'
-            : 'Your partner sent you a code — use it below to join their household'}
+            ? 'Create your profile, then connect with people you know and trust'
+            : 'Your partner sent you a code — use it below to link your own profile to theirs'}
         </Text>
 
         {mode === 'new_household' && (
           <>
-            <Text style={styles.label}>Household Name</Text>
+            <Text style={styles.label}>Display Name</Text>
             <TextInput
               style={styles.input}
-              placeholder="e.g. The Smith Household"
+              placeholder="e.g. The Smith Family"
               placeholderTextColor={colors.textMuted}
               value={householdName}
               onChangeText={setHouseholdName}
@@ -200,7 +200,7 @@ export default function SignupScreen() {
           {loading
             ? <ActivityIndicator color="#fff" />
             : <Text style={styles.buttonText}>
-                {mode === 'new_household' ? 'Create Account' : "Join Partner's Account"}
+                {mode === 'new_household' ? 'Create Account' : 'Join as Partner'}
               </Text>}
         </TouchableOpacity>
 

@@ -1371,6 +1371,1481 @@ language sql stable security definer as $$
 $$;
 
 -- ============================================================
+-- MIGRATION: Also allow all 7 reaction emoji in DMs
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 48. Village Chat's post_reactions already allows all 7; if this
+--     wasn't run before now, reacting with anything past 👍❤️👎 would
+--     have silently failed on a stale 3-emoji check constraint.
+alter table post_reactions drop constraint if exists post_reactions_emoji_check;
+alter table post_reactions add constraint post_reactions_emoji_check
+  check (emoji in ('👍', '❤️', '😂', '😮', '😢', '🔥', '👎'));
+
+-- 49. DMs never had reactions at all — new table, same shape as
+--     post_reactions. Scoped to the two people actually in the thread
+--     (checked via direct_messages, not open to anyone authenticated).
+create table if not exists dm_reactions (
+  id          uuid primary key default uuid_generate_v4(),
+  message_id  uuid not null references direct_messages(id) on delete cascade,
+  family_id   uuid not null references families(id) on delete cascade,
+  emoji       text not null check (emoji in ('👍', '❤️', '😂', '😮', '😢', '🔥', '👎')),
+  created_at  timestamptz not null default now(),
+  unique (message_id, family_id, emoji)
+);
+alter table dm_reactions enable row level security;
+create index if not exists idx_dm_reactions_message on dm_reactions(message_id);
+
+drop policy if exists "dm_reactions_select" on dm_reactions;
+drop policy if exists "dm_reactions_insert" on dm_reactions;
+drop policy if exists "dm_reactions_delete" on dm_reactions;
+create policy "dm_reactions_select" on dm_reactions for select to authenticated using (
+  exists (
+    select 1 from direct_messages dm where dm.id = message_id
+    and (dm.from_family_id = current_family_id() or dm.to_family_id = current_family_id())
+  )
+);
+create policy "dm_reactions_insert" on dm_reactions for insert to authenticated with check (
+  family_id = current_family_id()
+  and exists (
+    select 1 from direct_messages dm where dm.id = message_id
+    and (dm.from_family_id = current_family_id() or dm.to_family_id = current_family_id())
+  )
+);
+create policy "dm_reactions_delete" on dm_reactions for delete to authenticated using (family_id = current_family_id());
+
+-- 50. Delete-your-own-message for DMs, matching posts_delete's pattern
+--     (Village Chat already lets you delete your own post).
+drop policy if exists "dm_delete" on direct_messages;
+create policy "dm_delete" on direct_messages for delete to authenticated
+  using (from_family_id = current_family_id() or is_admin());
+
+-- 51. Per-thread DM mute reuses the same `mutes` table Village Chat
+--     already uses (muting a household is one concept, not a separate
+--     one per screen). Sender can't read the recipient's mute list
+--     directly (mutes_select is locked to your own rows, so people
+--     can't tell they've been muted) — this lets the sender check
+--     "would this push actually be wanted" without exposing that.
+create or replace function is_muted_by(p_family_id uuid)
+returns boolean language sql stable security definer as $$
+  select exists (
+    select 1 from mutes where family_id = p_family_id and muted_family_id = current_family_id()
+  );
+$$;
+
+-- 52. connections_update let the REQUESTER accept their own outgoing
+--     pending request (it only checked "am I either party"), so a
+--     household could self-grant 'accepted' status without the other
+--     side ever consenting — silently unlocking DMs, offer/accept
+--     eligibility, and full PII via that connection. Only the
+--     recipient may transition a connection's status.
+drop policy if exists "connections_update" on connections;
+create policy "connections_update" on connections for update to authenticated
+  using (recipient_id = current_family_id())
+  with check (recipient_id = current_family_id());
+
+-- ============================================================
+-- MIGRATION: Deferred settlement — hours transfer on the scheduled date,
+-- not at accept/approve time, with a reversal window.
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 53. Previously accept_request/approve_offer/approve_offering_claim moved
+--     hours immediately on approval — days or weeks before the task
+--     actually happened, and with no way to walk it back except the blunt
+--     "cancel accepted request" path. Hours now only move when
+--     auto_settle_requests() (cron, below) sees the scheduled date has
+--     passed, and the payer can reverse a bad settlement afterward.
+alter table requests add column if not exists settled_at timestamptz;
+alter table requests add column if not exists reversed_at timestamptz;
+
+-- pending_hours_delta: net hours a household stands to gain/lose across
+-- everything it has outstanding — open/offered posts plus accepted-but-
+-- not-yet-settled ones. hours_balance + this = "if it all resolves".
+-- Used both by the app (new-request pre-check) and server-side floor
+-- checks below, so the two can't drift.
+create or replace function pending_hours_delta(p_family_id uuid)
+returns numeric language sql stable security definer as $$
+  select coalesce(sum(
+    case
+      when post_type = 'request'  and requesting_family_id = p_family_id then -duration_hours
+      when post_type = 'request'  and fulfilling_family_id = p_family_id then duration_hours
+      when post_type = 'offering' and requesting_family_id = p_family_id then duration_hours
+      when post_type = 'offering' and fulfilling_family_id = p_family_id then -duration_hours
+      else 0
+    end
+  ), 0)
+  from requests
+  where (requesting_family_id = p_family_id or fulfilling_family_id = p_family_id)
+    and (status in ('open', 'offered') or (status = 'accepted' and settled_at is null));
+$$;
+
+create or replace function accept_request(
+  p_request_id           uuid,
+  p_fulfilling_family_id uuid
+)
+returns void language plpgsql security definer as $$
+declare
+  v_request    requests%rowtype;
+  v_projected  numeric;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'open' then raise exception 'Request is no longer open'; end if;
+  if v_request.requesting_family_id = p_fulfilling_family_id then
+    raise exception 'Cannot fulfill your own request';
+  end if;
+
+  if not (
+    p_fulfilling_family_id = current_family_id()
+    or is_admin()
+    or v_request.target_household_id = p_fulfilling_family_id
+    or exists (
+      select 1 from connections c
+      where c.status = 'accepted'
+        and (
+          (c.requester_id = v_request.requesting_family_id and c.recipient_id = p_fulfilling_family_id)
+          or (c.recipient_id = v_request.requesting_family_id and c.requester_id = p_fulfilling_family_id)
+        )
+    )
+  ) then
+    raise exception 'Not connected to requester or not authorized to accept this request';
+  end if;
+
+  -- This row is already counted in pending_hours_delta (status = 'open'),
+  -- so no need to subtract duration_hours again here.
+  select hours_balance + pending_hours_delta(v_request.requesting_family_id) into v_projected
+    from families where id = v_request.requesting_family_id for update;
+  if v_projected < -20 then
+    raise exception 'Requester balance would drop below -20 once outstanding commitments settle';
+  end if;
+
+  update requests
+    set status = 'accepted', fulfilling_family_id = p_fulfilling_family_id
+    where id = p_request_id;
+end;
+$$;
+
+create or replace function offer_request(p_request_id uuid, p_offering_family_id uuid)
+returns void language plpgsql security definer as $$
+declare v_request requests%rowtype;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'open' then raise exception 'Request is no longer open'; end if;
+  if v_request.requesting_family_id = p_offering_family_id then
+    raise exception 'Cannot offer to fulfill your own request';
+  end if;
+
+  if not (
+    p_offering_family_id = current_family_id()
+    or is_admin()
+    or v_request.target_household_id = p_offering_family_id
+    or exists (
+      select 1 from connections c
+      where c.status = 'accepted'
+        and (
+          (c.requester_id = v_request.requesting_family_id and c.recipient_id = p_offering_family_id)
+          or (c.recipient_id = v_request.requesting_family_id and c.requester_id = p_offering_family_id)
+        )
+    )
+  ) then
+    raise exception 'Not connected to requester';
+  end if;
+
+  update requests
+    set status = 'offered', fulfilling_family_id = p_offering_family_id
+    where id = p_request_id;
+end;
+$$;
+
+create or replace function approve_offer(p_request_id uuid, p_requester_family_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request    requests%rowtype;
+  v_projected  numeric;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'offered' then raise exception 'No pending offer on this request'; end if;
+  if v_request.requesting_family_id <> p_requester_family_id then
+    raise exception 'Only the requester can approve';
+  end if;
+  if not (p_requester_family_id = current_family_id() or is_admin()) then
+    raise exception 'Not authorized to approve this offer';
+  end if;
+
+  -- Already counted (status = 'offered') — approving just moves it from
+  -- "offered" to "accepted", both pending buckets, so total is unchanged.
+  select hours_balance + pending_hours_delta(v_request.requesting_family_id) into v_projected
+    from families where id = v_request.requesting_family_id for update;
+  if v_projected < -20 then
+    raise exception 'Balance would drop below -20 once outstanding commitments settle';
+  end if;
+
+  update requests set status = 'accepted' where id = p_request_id;
+end;
+$$;
+
+create or replace function approve_offering_claim(p_request_id uuid, p_offering_family_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request    requests%rowtype;
+  v_projected  numeric;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'offered' then raise exception 'No pending claim on this offering'; end if;
+  if v_request.requesting_family_id <> p_offering_family_id then
+    raise exception 'Only the offering family can approve';
+  end if;
+  if not (p_offering_family_id = current_family_id() or is_admin()) then
+    raise exception 'Not authorized to approve this claim';
+  end if;
+
+  select hours_balance + pending_hours_delta(v_request.fulfilling_family_id) into v_projected
+    from families where id = v_request.fulfilling_family_id for update;
+  if v_projected < -20 then
+    raise exception 'Claimer balance would drop below -20 once outstanding commitments settle';
+  end if;
+
+  update requests set status = 'accepted' where id = p_request_id;
+end;
+$$;
+
+-- Cancelling an accepted-but-not-yet-settled request has nothing to
+-- reverse (hours never moved) — just releases the commitment. Only
+-- unwind balances if settlement already happened. Also fixes a
+-- pre-existing bug: this always reversed requester+/fulfiller-,
+-- backwards for post_type = 'offering'.
+create or replace function cancel_accepted_request(p_request_id uuid, p_family_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request requests%rowtype;
+  v_from    uuid;
+  v_to      uuid;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'accepted' then raise exception 'Request is not in accepted status'; end if;
+
+  if v_request.requesting_family_id <> p_family_id
+     and v_request.fulfilling_family_id <> p_family_id then
+    raise exception 'Not authorized to cancel this request';
+  end if;
+  if not (p_family_id = current_family_id() or is_admin()) then
+    raise exception 'Not authorized to cancel this request';
+  end if;
+
+  if v_request.settled_at is not null then
+    if v_request.post_type = 'request' then
+      v_from := v_request.requesting_family_id; v_to := v_request.fulfilling_family_id;
+    else
+      v_from := v_request.fulfilling_family_id; v_to := v_request.requesting_family_id;
+    end if;
+    update families set hours_balance = hours_balance + v_request.duration_hours where id = v_from;
+    update families set hours_balance = hours_balance - v_request.duration_hours where id = v_to;
+    insert into transactions (from_family_id, to_family_id, hours, request_id, note)
+      values (v_to, v_from, v_request.duration_hours, p_request_id, 'Sit cancelled — hours returned');
+  end if;
+
+  if v_request.requesting_family_id = p_family_id then
+    update requests set status = 'cancelled', fulfilling_family_id = null where id = p_request_id;
+  else
+    update requests set status = 'open', fulfilling_family_id = null where id = p_request_id;
+  end if;
+end;
+$$;
+
+-- 54. settle_request: the actual hour transfer, called only by
+--     auto_settle_requests() below (or manually by an admin).
+create or replace function settle_request(p_request_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request requests%rowtype;
+  v_from    uuid;
+  v_to      uuid;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'accepted' then raise exception 'Request is not in an accepted state'; end if;
+  if v_request.settled_at is not null then raise exception 'Already settled'; end if;
+  if not is_admin() and current_family_id() is not null
+     and current_family_id() <> v_request.requesting_family_id
+     and current_family_id() <> v_request.fulfilling_family_id then
+    raise exception 'Not authorized to settle this request';
+  end if;
+
+  if v_request.post_type = 'request' then
+    v_from := v_request.requesting_family_id; v_to := v_request.fulfilling_family_id;
+  else
+    v_from := v_request.fulfilling_family_id; v_to := v_request.requesting_family_id;
+  end if;
+
+  update families set hours_balance = hours_balance - v_request.duration_hours where id = v_from;
+  update families set hours_balance = hours_balance + v_request.duration_hours where id = v_to;
+  update requests set settled_at = now() where id = p_request_id;
+  insert into transactions (from_family_id, to_family_id, hours, request_id, note)
+    values (v_from, v_to, v_request.duration_hours, p_request_id, 'Auto-settled on scheduled date');
+end;
+$$;
+
+-- 55. reverse_settlement: only the household that got charged can walk
+--     back a settlement that turned out not to have happened.
+create or replace function reverse_settlement(p_request_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request requests%rowtype;
+  v_from    uuid;
+  v_to      uuid;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.settled_at is null then raise exception 'Not settled yet'; end if;
+  if v_request.reversed_at is not null then raise exception 'Already reversed'; end if;
+
+  if v_request.post_type = 'request' then
+    v_from := v_request.requesting_family_id; v_to := v_request.fulfilling_family_id;
+  else
+    v_from := v_request.fulfilling_family_id; v_to := v_request.requesting_family_id;
+  end if;
+
+  if not (current_family_id() = v_from or is_admin()) then
+    raise exception 'Only the household that was charged can reverse this';
+  end if;
+
+  update families set hours_balance = hours_balance + v_request.duration_hours where id = v_from;
+  update families set hours_balance = hours_balance - v_request.duration_hours where id = v_to;
+  update requests set reversed_at = now(), status = 'cancelled' where id = p_request_id;
+  insert into transactions (from_family_id, to_family_id, hours, request_id, note)
+    values (v_to, v_from, v_request.duration_hours, p_request_id, 'Reversed settlement — did not happen');
+end;
+$$;
+
+-- 56. Daily settlement sweep, same pg_cron/pg_net pattern as the
+--     one-week reminder job above. Time-of-day isn't reliably parseable
+--     (start_time/end_time are free-form display strings, not a time
+--     type), so this settles at the day level: the morning after the
+--     scheduled date (or end_date for overnight/multi-day) has fully
+--     passed.
+create or replace function auto_settle_requests()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_from uuid;
+  v_to uuid;
+  v_earner_name text;
+  v_push text;
+  v_partner_push text;
+  v_messages jsonb := '[]'::jsonb;
+begin
+  for r in
+    select id, title, duration_hours, post_type, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and settled_at is null
+      and reversed_at is null
+      and fulfilling_family_id is not null
+      and coalesce(end_date, date) < current_date
+  loop
+    if r.post_type = 'request' then
+      v_from := r.requesting_family_id; v_to := r.fulfilling_family_id;
+    else
+      v_from := r.fulfilling_family_id; v_to := r.requesting_family_id;
+    end if;
+
+    perform settle_request(r.id);
+
+    select name into v_earner_name from families where id = v_to;
+    select push_token, partner_push_token into v_push, v_partner_push from families where id = v_from;
+
+    if v_push like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push, 'sound', 'default',
+        'title', '✅ Hours settled',
+        'body', format('We paid %s %sh for "%s". Didn''t happen? Tap here to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+        'data', jsonb_build_object('path', format('/(tabs)/requests?postType=%s&filter=upcoming', r.post_type))
+      );
+    end if;
+    if v_partner_push like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_partner_push, 'sound', 'default',
+        'title', '✅ Hours settled',
+        'body', format('We paid %s %sh for "%s". Didn''t happen? Tap here to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+        'data', jsonb_build_object('path', format('/(tabs)/requests?postType=%s&filter=upcoming', r.post_type))
+      );
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+select cron.schedule('auto-settle-hours-daily', '0 9 * * *', $$select auto_settle_requests();$$);
+
+-- ============================================================
+-- MIGRATION: Split shared household logins into independent profiles
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 57. partnerships: the new optional "linked partner" relationship.
+--     Replaces partner_user_id-on-one-shared-row — two people now have
+--     two fully independent profiles (own login, own balance, own
+--     requests), linked for visibility/FYI rather than sharing a row.
+create table if not exists partnerships (
+  id           uuid primary key default uuid_generate_v4(),
+  profile_a_id uuid not null references families(id) on delete cascade,
+  profile_b_id uuid not null references families(id) on delete cascade,
+  created_at   timestamptz not null default now(),
+  check (profile_a_id <> profile_b_id),
+  unique (profile_a_id, profile_b_id)
+);
+create index if not exists idx_partnerships_a on partnerships(profile_a_id);
+create index if not exists idx_partnerships_b on partnerships(profile_b_id);
+alter table partnerships enable row level security;
+
+drop policy if exists "partnerships_select" on partnerships;
+drop policy if exists "partnerships_insert" on partnerships;
+drop policy if exists "partnerships_delete" on partnerships;
+create policy "partnerships_select" on partnerships for select to authenticated
+  using (profile_a_id = current_family_id() or profile_b_id = current_family_id() or is_admin());
+create policy "partnerships_insert" on partnerships for insert to authenticated
+  with check (profile_a_id = current_family_id() or profile_b_id = current_family_id());
+create policy "partnerships_delete" on partnerships for delete to authenticated
+  using (profile_a_id = current_family_id() or profile_b_id = current_family_id() or is_admin());
+
+-- 58. One-time backfill: every existing partner already has their own
+--     auth.users login (join_as_partner just never gave them their own
+--     row) — give them one now and link the two via partnerships. Both
+--     keep the current shared hours_balance (agreed approach: not split,
+--     not zeroed, since it was jointly earned/spent up to now). Kid info
+--     is copied to both rather than assigned to just one, so nobody
+--     loses visibility into their own kids as a side effect of this
+--     migration.
+do $$
+declare
+  r record;
+  v_new_id uuid;
+  v_partner_email text;
+begin
+  for r in select * from families where partner_user_id is not null loop
+    select email into v_partner_email from auth.users where id = r.partner_user_id;
+    if v_partner_email is null then
+      raise notice 'Skipping partner_user_id % on family % — no matching auth.users row', r.partner_user_id, r.id;
+      continue;
+    end if;
+
+    insert into families (
+      user_id, name, email, hours_balance, is_admin, is_active,
+      kids_data, kids_info, parent1_name, parent1_phone,
+      address, emergency_contact, animal, services_offered,
+      village_notifications, discoverable
+    ) values (
+      r.partner_user_id, r.name, v_partner_email, r.hours_balance, false, true,
+      r.kids_data, r.kids_info, r.parent2_name, r.parent2_phone,
+      r.address, r.emergency_contact, r.animal, r.services_offered,
+      r.village_notifications, r.discoverable
+    )
+    returning id into v_new_id;
+
+    insert into partnerships (profile_a_id, profile_b_id) values (r.id, v_new_id);
+
+    update families
+      set partner_user_id = null, partner_push_token = null,
+          parent2_name = null, parent2_phone = null
+      where id = r.id;
+  end loop;
+end $$;
+
+-- 59. Every function/policy that special-cased partner_user_id now just
+--     treats every profile as its own row — no more "am I the primary
+--     or the partner" branch anywhere.
+create or replace function current_family_id()
+returns uuid language sql stable security definer as $$
+  select id from families where user_id = auth.uid() limit 1;
+$$;
+
+create or replace function is_admin()
+returns boolean language sql stable security definer as $$
+  select coalesce((select is_admin from families where user_id = auth.uid() and is_active limit 1), false);
+$$;
+
+drop policy if exists "families_update" on families;
+create policy "families_update" on families for update to authenticated
+  using ((user_id = auth.uid() and is_active) or is_admin());
+
+drop policy if exists "families_select" on families;
+create policy "families_select" on families for select to authenticated using (
+  user_id = auth.uid()
+  or is_admin()
+  or (is_active and are_connected(id, current_family_id()))
+  or (is_active and exists (
+    select 1 from partnerships p
+    where (p.profile_a_id = id and p.profile_b_id = current_family_id())
+       or (p.profile_b_id = id and p.profile_a_id = current_family_id())
+  ))
+);
+
+-- 60. join_as_partner now creates the redeemer their own profile (fresh
+--     starting balance, like any new signup — there's no shared history
+--     to inherit yet) and links it to the inviter via partnerships,
+--     instead of attaching to the inviter's row.
+create or replace function join_as_partner(p_code text)
+returns void language plpgsql security definer as $$
+declare
+  v_invite  invites%rowtype;
+  v_inviter families%rowtype;
+  v_new_id  uuid;
+begin
+  select * into v_invite from invites
+  where code = p_code and invite_type = 'partner' and used_by is null;
+  if not found then
+    raise exception 'Invalid or already used partner invite code';
+  end if;
+
+  if exists (select 1 from families where user_id = auth.uid()) then
+    raise exception 'You already have a profile';
+  end if;
+
+  select * into v_inviter from families where id = v_invite.family_id;
+
+  insert into families (user_id, name, email, hours_balance, is_admin, is_active)
+  values (auth.uid(), v_inviter.name, (select email from auth.users where id = auth.uid()), 10, false, true)
+  returning id into v_new_id;
+
+  insert into partnerships (profile_a_id, profile_b_id) values (v_invite.family_id, v_new_id);
+
+  update invites set used_by = auth.uid(), used_at = now() where id = v_invite.id;
+end;
+$$;
+
+-- 61. delete_own_account: no more asymmetric "am I the partner" path —
+--     every profile is a peer now. Leaving a partnership just removes
+--     the link; deactivating your own profile works the same for
+--     everyone.
+create or replace function delete_own_account()
+returns void language plpgsql security definer as $$
+declare
+  v_family_id uuid;
+begin
+  select id into v_family_id from families where user_id = auth.uid() and is_active;
+  if v_family_id is null then raise exception 'Not authenticated'; end if;
+
+  delete from partnerships where profile_a_id = v_family_id or profile_b_id = v_family_id;
+
+  update families set
+    is_active = false,
+    discoverable = false,
+    parent1_name = null,
+    parent1_phone = null,
+    address = null,
+    emergency_contact = null,
+    kids_info = null,
+    kids_data = null,
+    push_token = null,
+    connect_code = null
+  where id = v_family_id;
+end;
+$$;
+
+-- 62. leave_partnership: unlink from a partner without deactivating
+--     your own profile (the old "Leave Household" action, now separate
+--     from account deletion since a profile isn't nested inside one
+--     anymore — it's an independent thing that happens to be linked).
+create or replace function leave_partnership(p_partnership_id uuid)
+returns void language plpgsql security definer as $$
+begin
+  delete from partnerships
+  where id = p_partnership_id
+    and (profile_a_id = current_family_id() or profile_b_id = current_family_id());
+end;
+$$;
+
+create or replace function get_admin_push_tokens()
+returns table(push_token text)
+language sql stable security definer as $$
+  select push_token from families where is_admin and is_active;
+$$;
+
+-- send_request_reminders and auto_settle_requests (both defined earlier
+-- in this file) also read partner_push_token — re-created here without
+-- it now that every profile has exactly one push_token of its own.
+create or replace function send_request_reminders()
+returns void language plpgsql security definer as $$
+declare
+  v_messages jsonb := '[]'::jsonb;
+  r record;
+begin
+  for r in
+    select req.id, req.title, f.push_token
+    from requests req
+    join families f on f.id = req.requesting_family_id
+    where req.post_type = 'request'
+      and req.status = 'open'
+      and req.reminder_sent = false
+      and req.date = (current_date + 7)
+  loop
+    if r.push_token like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', r.push_token,
+        'title', '⏰ Still looking for help',
+        'body', format('No one has accepted your request "%s" yet — it''s scheduled in a week. Consider sending a personal message or finding an alternative.', r.title),
+        'sound', 'default'
+      );
+    end if;
+    update requests set reminder_sent = true where id = r.id;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+create or replace function auto_settle_requests()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_from uuid;
+  v_to uuid;
+  v_earner_name text;
+  v_push text;
+  v_messages jsonb := '[]'::jsonb;
+begin
+  for r in
+    select id, title, duration_hours, post_type, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and settled_at is null
+      and reversed_at is null
+      and fulfilling_family_id is not null
+      and coalesce(end_date, date) < current_date
+  loop
+    if r.post_type = 'request' then
+      v_from := r.requesting_family_id; v_to := r.fulfilling_family_id;
+    else
+      v_from := r.fulfilling_family_id; v_to := r.requesting_family_id;
+    end if;
+
+    perform settle_request(r.id);
+
+    select name into v_earner_name from families where id = v_to;
+    select push_token into v_push from families where id = v_from;
+
+    if v_push like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push, 'sound', 'default',
+        'title', '✅ Hours settled',
+        'body', format('We paid %s %sh for "%s". Didn''t happen? Tap here to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+        'data', jsonb_build_object('path', format('/(tabs)/requests?postType=%s&filter=upcoming', r.post_type))
+      );
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+-- 63. partner_user_id/partner_push_token/parent2_* no longer mean
+--     anything — every profile is independent now, linked (if at all)
+--     via partnerships.
+alter table families drop column if exists partner_user_id;
+alter table families drop column if exists partner_push_token;
+alter table families drop column if exists parent2_name;
+alter table families drop column if exists parent2_phone;
+
+-- ============================================================
+-- MIGRATION: Fix invisible counterpart on direct (target_household_id)
+-- requests — offer_request/accept_request already let a directly-targeted
+-- household interact without an accepted connection (requests_select has
+-- always granted visibility of the *request* via target_household_id),
+-- but families_select never had a matching clause. Result: the request
+-- was visible and actionable, but the other household's name/phone/email
+-- came back null via the join — an offer or accepted sit with no way to
+-- tell who it actually was.
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 64. Grant full-profile visibility whenever the two households are
+--     actively linked by a live (non-terminal) request between them —
+--     as a direct target, or as requester/fulfiller on the same row —
+--     not just via an accepted connection or partnership.
+drop policy if exists "families_select" on families;
+create policy "families_select" on families for select to authenticated using (
+  user_id = auth.uid()
+  or is_admin()
+  or (is_active and are_connected(id, current_family_id()))
+  or (is_active and exists (
+    select 1 from partnerships p
+    where (p.profile_a_id = id and p.profile_b_id = current_family_id())
+       or (p.profile_b_id = id and p.profile_a_id = current_family_id())
+  ))
+  or (is_active and current_family_id() is not null and exists (
+    select 1 from requests r
+    where r.status in ('open', 'offered', 'accepted')
+      and (
+        (r.requesting_family_id = id and (r.fulfilling_family_id = current_family_id() or r.target_household_id = current_family_id()))
+        or (r.fulfilling_family_id = id and r.requesting_family_id = current_family_id())
+        or (r.target_household_id = id and r.requesting_family_id = current_family_id())
+      )
+  ))
+);
+
+-- ============================================================
+-- MIGRATION: Priority / urgent flag on requests
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 65. Lets a requester flag something time-sensitive (last-minute
+--     childcare for a wedding, etc.) so it stands out instead of sitting
+--     in a flat list next to everything else.
+alter table requests add column if not exists is_urgent boolean not null default false;
+
+-- ============================================================
+-- MIGRATION: Profile photos
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 66. Real photos instead of emoji-avatar + last-name-only — testers
+--     wanted to visually confirm who they recognize before trusting a
+--     stranger-ish connection. photo_url stays null (falls back to the
+--     existing animal emoji) until someone sets one.
+alter table families add column if not exists photo_url text;
+
+create or replace view families_public as
+  select id, name, animal, services_offered, hours_balance, is_admin, created_at, discoverable, photo_url
+  from families
+  where is_active and (current_family_id() is not null or is_admin());
+grant select on families_public to authenticated;
+
+-- 67. Storage bucket for avatar photos. Public bucket (read is a plain
+--     CDN URL, no auth needed — profile photos aren't sensitive the way
+--     phone/address are) but writes are locked to your own folder,
+--     keyed by family id, mirroring the pattern the rest of this app
+--     uses everywhere else.
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', true)
+on conflict (id) do nothing;
+
+drop policy if exists "avatar_insert" on storage.objects;
+drop policy if exists "avatar_update" on storage.objects;
+drop policy if exists "avatar_delete" on storage.objects;
+create policy "avatar_insert" on storage.objects for insert to authenticated
+  with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = current_family_id()::text);
+create policy "avatar_update" on storage.objects for update to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = current_family_id()::text);
+create policy "avatar_delete" on storage.objects for delete to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = current_family_id()::text);
+
+-- ============================================================
+-- MIGRATION: Close two RLS gaps found in a full permissions/privacy audit
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 68. requests_insert/requests_update never validated target_household_id
+--     at all — the app's new-request picker only ever offers connected
+--     households, but nothing server-side stopped a direct API call from
+--     setting it to *any* household id, connected or blocked, letting
+--     someone route a "personal request" straight at someone who blocked
+--     them (defeating the entire point of blocking) or at a total
+--     stranger they were never connected to. requests_update additionally
+--     had no WITH CHECK at all — a requester could rewrite status/
+--     fulfilling_family_id directly via the REST API and skip every
+--     RPC's connection/floor/self-request checks entirely (accept_request
+--     etc. are only the *intended* path, RLS is the actual boundary).
+drop policy if exists "requests_insert" on requests;
+create policy "requests_insert" on requests for insert to authenticated
+  with check (
+    requesting_family_id = current_family_id()
+    and (
+      target_household_id is null
+      or (are_connected(requesting_family_id, target_household_id) and not is_blocked(requesting_family_id, target_household_id))
+    )
+  );
+
+drop policy if exists "requests_update" on requests;
+create policy "requests_update" on requests for update to authenticated
+  using (requesting_family_id = current_family_id() or fulfilling_family_id = current_family_id() or is_admin())
+  with check (
+    is_admin()
+    -- Direct edits (edit-request.tsx) only ever touch an open, unclaimed
+    -- request, and never target_household_id — this just re-validates it
+    -- didn't get hand-crafted into an invalid state.
+    or (
+      status = 'open' and fulfilling_family_id is null
+      and (target_household_id is null or (are_connected(requesting_family_id, target_household_id) and not is_blocked(requesting_family_id, target_household_id)))
+    )
+    -- Mark as Completed (requests.tsx) is the one legitimate direct
+    -- status write outside the RPCs.
+    or status = 'completed'
+  );
+
+-- 69. offer_request/accept_request's target_household_id path let a
+--     directly-targeted household act on that one request even after
+--     being blocked — block_household() only deletes the connections
+--     row, which the connection-based auth path already respects, but
+--     the target_household_id path had no block check of its own.
+create or replace function accept_request(
+  p_request_id           uuid,
+  p_fulfilling_family_id uuid
+)
+returns void language plpgsql security definer as $$
+declare
+  v_request    requests%rowtype;
+  v_projected  numeric;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'open' then raise exception 'Request is no longer open'; end if;
+  if v_request.requesting_family_id = p_fulfilling_family_id then
+    raise exception 'Cannot fulfill your own request';
+  end if;
+  if is_blocked(v_request.requesting_family_id, p_fulfilling_family_id) then
+    raise exception 'Not authorized to accept this request';
+  end if;
+
+  if not (
+    p_fulfilling_family_id = current_family_id()
+    or is_admin()
+    or v_request.target_household_id = p_fulfilling_family_id
+    or exists (
+      select 1 from connections c
+      where c.status = 'accepted'
+        and (
+          (c.requester_id = v_request.requesting_family_id and c.recipient_id = p_fulfilling_family_id)
+          or (c.recipient_id = v_request.requesting_family_id and c.requester_id = p_fulfilling_family_id)
+        )
+    )
+  ) then
+    raise exception 'Not connected to requester or not authorized to accept this request';
+  end if;
+
+  select hours_balance + pending_hours_delta(v_request.requesting_family_id) into v_projected
+    from families where id = v_request.requesting_family_id for update;
+  if v_projected < -20 then
+    raise exception 'Requester balance would drop below -20 once outstanding commitments settle';
+  end if;
+
+  update requests
+    set status = 'accepted', fulfilling_family_id = p_fulfilling_family_id
+    where id = p_request_id;
+end;
+$$;
+
+create or replace function offer_request(p_request_id uuid, p_offering_family_id uuid)
+returns void language plpgsql security definer as $$
+declare v_request requests%rowtype;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'open' then raise exception 'Request is no longer open'; end if;
+  if v_request.requesting_family_id = p_offering_family_id then
+    raise exception 'Cannot offer to fulfill your own request';
+  end if;
+  if is_blocked(v_request.requesting_family_id, p_offering_family_id) then
+    raise exception 'Not authorized to offer on this request';
+  end if;
+
+  if not (
+    p_offering_family_id = current_family_id()
+    or is_admin()
+    or v_request.target_household_id = p_offering_family_id
+    or exists (
+      select 1 from connections c
+      where c.status = 'accepted'
+        and (
+          (c.requester_id = v_request.requesting_family_id and c.recipient_id = p_offering_family_id)
+          or (c.recipient_id = v_request.requesting_family_id and c.requester_id = p_offering_family_id)
+        )
+    )
+  ) then
+    raise exception 'Not connected to requester';
+  end if;
+
+  update requests
+    set status = 'offered', fulfilling_family_id = p_offering_family_id
+    where id = p_request_id;
+end;
+$$;
+
+-- 70. Regression from this session's own household→profile migration:
+--     current_family_id() lost the "and is_active" guard an earlier
+--     migration had deliberately added specifically so a deactivated
+--     (admin-removed) account's session stops being treated as anyone
+--     the moment it's removed. Without it, most RLS policies — which
+--     gate purely via current_family_id() — kept working for a removed
+--     account: it could still post requests, message, react, etc.
+--     is_admin() already had the guard; current_family_id() needs it too.
+create or replace function current_family_id()
+returns uuid language sql stable security definer as $$
+  select id from families where user_id = auth.uid() and is_active limit 1;
+$$;
+
+-- ============================================================
+-- MIGRATION: Pets on profile (mirrors kids_data)
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 71. Same privacy model as kids_data — only visible via the full
+--     `families` row (self, admin, connected, or actively transacting),
+--     never in families_public.
+alter table families add column if not exists pets_data jsonb;
+
+-- ============================================================
+-- MIGRATION: Notification usability fixes
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 72. join_as_partner never told the inviter their partner actually
+--     joined — the only way to find out was opening Profile and
+--     noticing the link. Security-definer function already has
+--     everything it needs; push directly via net.http_post rather than
+--     round-tripping through the client (the joining user's own client
+--     state isn't fully set up yet at this point in signup anyway).
+create or replace function join_as_partner(p_code text)
+returns void language plpgsql security definer as $$
+declare
+  v_invite  invites%rowtype;
+  v_inviter families%rowtype;
+  v_new_id  uuid;
+  v_push    text;
+begin
+  select * into v_invite from invites
+  where code = p_code and invite_type = 'partner' and used_by is null;
+  if not found then
+    raise exception 'Invalid or already used partner invite code';
+  end if;
+
+  if exists (select 1 from families where user_id = auth.uid()) then
+    raise exception 'You already have a profile';
+  end if;
+
+  select * into v_inviter from families where id = v_invite.family_id;
+
+  insert into families (user_id, name, email, hours_balance, is_admin, is_active)
+  values (auth.uid(), v_inviter.name, (select email from auth.users where id = auth.uid()), 10, false, true)
+  returning id into v_new_id;
+
+  insert into partnerships (profile_a_id, profile_b_id) values (v_invite.family_id, v_new_id);
+
+  update invites set used_by = auth.uid(), used_at = now() where id = v_invite.id;
+
+  select push_token into v_push from families where id = v_inviter.id;
+  if v_push like 'ExponentPushToken%' then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := jsonb_build_array(jsonb_build_object(
+        'to', v_push, 'sound', 'default',
+        'title', '🎉 Your partner joined!',
+        'body', 'They linked their own profile to yours — you each keep your own login and balance.',
+        'data', jsonb_build_object('path', '/(tabs)/profile')
+      ))
+    );
+  end if;
+end;
+$$;
+
+-- 73. auto_settle_requests only ever told the payer ("we paid X") — the
+--     person who just earned hours got nothing. Also drops a stale
+--     postType query param the requests screen no longer reads
+--     (offers were removed from the app).
+create or replace function auto_settle_requests()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_from uuid;
+  v_to uuid;
+  v_earner_name text;
+  v_payer_name text;
+  v_push_from text;
+  v_push_to text;
+  v_messages jsonb := '[]'::jsonb;
+begin
+  for r in
+    select id, title, duration_hours, post_type, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and settled_at is null
+      and reversed_at is null
+      and fulfilling_family_id is not null
+      and coalesce(end_date, date) < current_date
+  loop
+    if r.post_type = 'request' then
+      v_from := r.requesting_family_id; v_to := r.fulfilling_family_id;
+    else
+      v_from := r.fulfilling_family_id; v_to := r.requesting_family_id;
+    end if;
+
+    perform settle_request(r.id);
+
+    select name into v_earner_name from families where id = v_to;
+    select name into v_payer_name from families where id = v_from;
+    select push_token into v_push_from from families where id = v_from;
+    select push_token into v_push_to from families where id = v_to;
+
+    if v_push_from like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_from, 'sound', 'default',
+        'title', '✅ Hours settled',
+        'body', format('We paid %s %sh for "%s". Didn''t happen? Tap here to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+        'data', jsonb_build_object('path', '/(tabs)/requests?filter=upcoming')
+      );
+    end if;
+    if v_push_to like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_to, 'sound', 'default',
+        'title', '💰 You got paid',
+        'body', format('%sh from %s for "%s" just landed in your balance.', r.duration_hours, coalesce(v_payer_name, 'them'), r.title),
+        'data', jsonb_build_object('path', '/(tabs)/requests?filter=upcoming')
+      );
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+-- 74. Day-before reminder for a confirmed sit — nothing previously
+--     nudged either side that something they'd committed to was
+--     tomorrow (only unfilled, still-open requests got a reminder).
+--     Notifies both the requester and the helper.
+alter table requests add column if not exists sit_reminder_sent boolean not null default false;
+
+create or replace function send_upcoming_sit_reminders()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_messages jsonb := '[]'::jsonb;
+  v_push_req text;
+  v_push_ful text;
+  v_other_name text;
+begin
+  for r in
+    select id, title, start_time, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and sit_reminder_sent = false
+      and fulfilling_family_id is not null
+      and date = (current_date + 1)
+  loop
+    select name into v_other_name from families where id = r.fulfilling_family_id;
+    select push_token into v_push_req from families where id = r.requesting_family_id;
+    if v_push_req like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_req, 'sound', 'default',
+        'title', '📅 Tomorrow',
+        'body', format('"%s" with %s is tomorrow at %s.', r.title, coalesce(v_other_name, 'your helper'), r.start_time),
+        'data', jsonb_build_object('path', format('/request/%s', r.id))
+      );
+    end if;
+
+    select name into v_other_name from families where id = r.requesting_family_id;
+    select push_token into v_push_ful from families where id = r.fulfilling_family_id;
+    if v_push_ful like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_ful, 'sound', 'default',
+        'title', '📅 Tomorrow',
+        'body', format('"%s" for %s is tomorrow at %s.', r.title, coalesce(v_other_name, 'them'), r.start_time),
+        'data', jsonb_build_object('path', format('/request/%s', r.id))
+      );
+    end if;
+
+    update requests set sit_reminder_sent = true where id = r.id;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+select cron.schedule('sit-reminders-daily', '0 15 * * *', $$select send_upcoming_sit_reminders();$$);
+
+-- ============================================================
+-- MIGRATION: Group chats
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 75. Group chats — a named thread among a creator-picked set of their
+--     connections. Unread tracking is a single last_read_at per
+--     (group, member) rather than per-message read_at like DMs use,
+--     since a group message has many readers instead of one.
+create table if not exists group_chats (
+  id          uuid primary key default uuid_generate_v4(),
+  name        text not null,
+  created_by  uuid not null references families(id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
+
+create table if not exists group_chat_members (
+  group_id   uuid not null references group_chats(id) on delete cascade,
+  family_id  uuid not null references families(id) on delete cascade,
+  joined_at  timestamptz not null default now(),
+  primary key (group_id, family_id)
+);
+
+create table if not exists group_messages (
+  id             uuid primary key default uuid_generate_v4(),
+  group_id       uuid not null references group_chats(id) on delete cascade,
+  from_family_id uuid not null references families(id) on delete cascade,
+  body           text not null,
+  created_at     timestamptz not null default now()
+);
+create index if not exists idx_group_messages_group on group_messages(group_id, created_at);
+
+create table if not exists group_message_reads (
+  group_id      uuid not null references group_chats(id) on delete cascade,
+  family_id     uuid not null references families(id) on delete cascade,
+  last_read_at  timestamptz not null default now(),
+  primary key (group_id, family_id)
+);
+
+alter table group_chats enable row level security;
+alter table group_chat_members enable row level security;
+alter table group_messages enable row level security;
+alter table group_message_reads enable row level security;
+
+create or replace function is_group_member(p_group_id uuid, p_family_id uuid)
+returns boolean language sql stable security definer as $$
+  select exists (select 1 from group_chat_members where group_id = p_group_id and family_id = p_family_id);
+$$;
+
+drop policy if exists "group_chats_select" on group_chats;
+drop policy if exists "group_chats_insert" on group_chats;
+create policy "group_chats_select" on group_chats for select to authenticated
+  using (is_group_member(id, current_family_id()) or is_admin());
+create policy "group_chats_insert" on group_chats for insert to authenticated
+  with check (created_by = current_family_id());
+
+drop policy if exists "group_chat_members_select" on group_chat_members;
+drop policy if exists "group_chat_members_insert" on group_chat_members;
+drop policy if exists "group_chat_members_delete" on group_chat_members;
+create policy "group_chat_members_select" on group_chat_members for select to authenticated
+  using (is_group_member(group_id, current_family_id()) or is_admin());
+-- Only the creator can add members, and only people they're connected
+-- to — same trust boundary DMs use, so a group can't pull in a
+-- stranger via someone else's connections.
+create policy "group_chat_members_insert" on group_chat_members for insert to authenticated
+  with check (
+    exists (select 1 from group_chats g where g.id = group_id and g.created_by = current_family_id())
+    and (family_id = current_family_id() or are_connected(current_family_id(), family_id))
+  );
+create policy "group_chat_members_delete" on group_chat_members for delete to authenticated
+  using (family_id = current_family_id());
+
+drop policy if exists "group_messages_select" on group_messages;
+drop policy if exists "group_messages_insert" on group_messages;
+create policy "group_messages_select" on group_messages for select to authenticated
+  using (is_group_member(group_id, current_family_id()) or is_admin());
+create policy "group_messages_insert" on group_messages for insert to authenticated
+  with check (from_family_id = current_family_id() and is_group_member(group_id, current_family_id()));
+
+drop policy if exists "group_message_reads_select" on group_message_reads;
+drop policy if exists "group_message_reads_insert" on group_message_reads;
+drop policy if exists "group_message_reads_update" on group_message_reads;
+create policy "group_message_reads_select" on group_message_reads for select to authenticated
+  using (family_id = current_family_id());
+create policy "group_message_reads_insert" on group_message_reads for insert to authenticated
+  with check (family_id = current_family_id());
+create policy "group_message_reads_update" on group_message_reads for update to authenticated
+  using (family_id = current_family_id());
+
+-- 76. create_group_chat: creates the group, adds the creator plus the
+--     chosen members in one call (avoids a half-created group if the
+--     member inserts partially fail), and seeds everyone's read marker
+--     so a brand-new group doesn't show as having unread history.
+create or replace function create_group_chat(p_name text, p_member_ids uuid[])
+returns uuid language plpgsql security definer as $$
+declare
+  v_me uuid;
+  v_group_id uuid;
+  v_member uuid;
+begin
+  v_me := current_family_id();
+  if v_me is null then raise exception 'Not authenticated'; end if;
+  if trim(p_name) = '' then raise exception 'Group name is required'; end if;
+
+  insert into group_chats (name, created_by) values (trim(p_name), v_me) returning id into v_group_id;
+
+  insert into group_chat_members (group_id, family_id) values (v_group_id, v_me);
+  insert into group_message_reads (group_id, family_id) values (v_group_id, v_me);
+
+  foreach v_member in array p_member_ids loop
+    if v_member <> v_me and are_connected(v_me, v_member) then
+      insert into group_chat_members (group_id, family_id) values (v_group_id, v_member)
+        on conflict do nothing;
+      insert into group_message_reads (group_id, family_id) values (v_group_id, v_member)
+        on conflict do nothing;
+    end if;
+  end loop;
+
+  return v_group_id;
+end;
+$$;
+
+-- 77. Push everyone in the group except the sender when a message lands.
+create or replace function notify_group_message(p_group_id uuid, p_sender_name text, p_body text)
+returns void language plpgsql security definer as $$
+declare
+  v_me uuid;
+  v_group_name text;
+  v_messages jsonb := '[]'::jsonb;
+  r record;
+begin
+  v_me := current_family_id();
+  select name into v_group_name from group_chats where id = p_group_id;
+
+  for r in
+    select f.push_token
+    from group_chat_members m
+    join families f on f.id = m.family_id
+    where m.group_id = p_group_id and m.family_id <> v_me
+  loop
+    if r.push_token like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', r.push_token, 'sound', 'default',
+        'title', format('%s · %s', coalesce(v_group_name, 'Group'), p_sender_name),
+        'body', p_body,
+        'data', jsonb_build_object('path', format('/group/%s', p_group_id))
+      );
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: Fix "Mark as Completed" never actually settling hours
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 78. requests_update's "status = 'completed' is the one legitimate direct
+--     write" escape hatch (migration 68) let the app flip a request straight
+--     to 'completed' via a plain client .update() with zero hour transfer —
+--     settle_request() was never called. Two knock-on breaks: (1) hours
+--     never actually moved, but pending_hours_delta/getPendingBreakdown
+--     stop counting the row the moment status leaves 'accepted', so the
+--     hours vanished from both "pending" AND the real balance — gone
+--     nowhere; (2) auto_settle_requests only ever looks at status =
+--     'accepted', so a request completed before its scheduled date passed
+--     was permanently skipped by the cron too, and reverse_settlement/
+--     cancel_accepted_request both require state this row could never be
+--     in again. Net effect: tapping "Mark as Completed" any time before
+--     the cron would have settled it anyway silently ate the hours.
+--     Fix: completion now goes through one RPC that settles (if not
+--     already settled) and only then flips status, so 'completed' always
+--     implies settled_at is set — same as manually confirming what the
+--     cron does automatically once the date passes.
+create or replace function complete_request(p_request_id uuid)
+returns void language plpgsql security definer as $$
+declare
+  v_request requests%rowtype;
+begin
+  select * into v_request from requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_request.status <> 'accepted' then raise exception 'Request is not in an accepted state'; end if;
+  if not (
+    is_admin()
+    or current_family_id() = v_request.requesting_family_id
+    or current_family_id() = v_request.fulfilling_family_id
+  ) then
+    raise exception 'Not authorized to complete this request';
+  end if;
+
+  if v_request.settled_at is null then
+    perform settle_request(p_request_id);
+  end if;
+
+  update requests set status = 'completed' where id = p_request_id;
+end;
+$$;
+
+-- The direct "status = 'completed'" bypass is no longer needed now that
+-- completion goes through complete_request (SECURITY DEFINER, bypasses
+-- RLS) — removing it closes the hole that let any client update a
+-- request straight to 'completed' with no hour transfer at all.
+drop policy if exists "requests_update" on requests;
+create policy "requests_update" on requests for update to authenticated
+  using (requesting_family_id = current_family_id() or fulfilling_family_id = current_family_id() or is_admin())
+  with check (
+    is_admin()
+    or (
+      status = 'open' and fulfilling_family_id is null
+      and (target_household_id is null or (are_connected(requesting_family_id, target_household_id) and not is_blocked(requesting_family_id, target_household_id)))
+    )
+  );
+
+-- Cron-settled requests were left sitting at status = 'accepted' forever
+-- (only settled_at got set), so a sit whose date passed without anyone
+-- tapping "Mark as Completed" showed as permanently "Past date · Accepted"
+-- even though it had already paid out. Now the cron finishes the same
+-- state transition a manual completion does.
+create or replace function auto_settle_requests()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_from uuid;
+  v_to uuid;
+  v_earner_name text;
+  v_payer_name text;
+  v_push_from text;
+  v_push_to text;
+  v_messages jsonb := '[]'::jsonb;
+begin
+  for r in
+    select id, title, duration_hours, post_type, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and settled_at is null
+      and reversed_at is null
+      and fulfilling_family_id is not null
+      and coalesce(end_date, date) < current_date
+  loop
+    if r.post_type = 'request' then
+      v_from := r.requesting_family_id; v_to := r.fulfilling_family_id;
+    else
+      v_from := r.fulfilling_family_id; v_to := r.requesting_family_id;
+    end if;
+
+    perform settle_request(r.id);
+    update requests set status = 'completed' where id = r.id;
+
+    select name into v_earner_name from families where id = v_to;
+    select name into v_payer_name from families where id = v_from;
+    select push_token into v_push_from from families where id = v_from;
+    select push_token into v_push_to from families where id = v_to;
+
+    if v_push_from like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_from, 'sound', 'default',
+        'title', '✅ Hours settled',
+        'body', format('We paid %s %sh for "%s". Didn''t happen? Tap here to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+        'data', jsonb_build_object('path', '/(tabs)/requests?filter=upcoming')
+      );
+    end if;
+    if v_push_to like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_to, 'sound', 'default',
+        'title', '💰 You got paid',
+        'body', format('%sh from %s for "%s" just landed in your balance.', r.duration_hours, coalesce(v_payer_name, 'them'), r.title),
+        'data', jsonb_build_object('path', '/(tabs)/requests?filter=upcoming')
+      );
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(
+      url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'),
+      body := v_messages
+    );
+  end if;
+end;
+$$;
+
+-- ============================================================
+-- MIGRATION: direct_messages was missing an UPDATE policy entirely
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 79. direct_messages has always had select/insert/delete policies but no
+--     UPDATE policy at all. With RLS enabled and zero UPDATE policies, every
+--     update is denied by default — not with an error, just 0 rows
+--     affected, silently. markRead() (dm/[familyId].tsx) has been calling
+--     `update direct_messages set read_at = ... where to_family_id = me`
+--     this whole time and it has never once actually applied: read_at
+--     never got set, so the Messages-tab unread badge (which counts
+--     `read_at is null`) never cleared no matter how many times a thread
+--     was opened. Recipient can mark their own inbound messages read;
+--     nothing else about a message is meant to be editable this way.
+create policy "dm_update" on direct_messages for update to authenticated
+  using (to_family_id = current_family_id())
+  with check (to_family_id = current_family_id());
+
+-- ============================================================
+-- MIGRATION: verify admin hour adjustments actually land
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 80. admin_adjust_balance returned void, so the app had to trust the
+--     write happened and refetch separately to show it — if that refetch
+--     ever raced or targeted a stale family object, an admin adjustment
+--     could look like it silently did nothing even though it succeeded
+--     (or vice versa). Returning the resulting balance lets the client
+--     show the actual post-write number immediately, no refetch needed to
+--     confirm it landed.
+drop function if exists admin_adjust_balance(uuid, numeric, text, uuid);
+create or replace function admin_adjust_balance(
+  p_family_id uuid,
+  p_hours     numeric,
+  p_note      text,
+  p_admin_id  uuid
+)
+returns numeric language plpgsql security definer as $$
+declare
+  v_new_bal numeric;
+begin
+  if not is_admin() then
+    raise exception 'Not authorized';
+  end if;
+
+  select hours_balance + p_hours into v_new_bal from families where id = p_family_id for update;
+  if v_new_bal is null then
+    raise exception 'Household not found';
+  end if;
+  if v_new_bal < -20 then
+    raise exception 'Balance cannot go below -20';
+  end if;
+
+  update families set hours_balance = v_new_bal where id = p_family_id;
+
+  insert into transactions (from_family_id, to_family_id, hours, note)
+    values (
+      case when p_hours < 0 then p_family_id else null end,
+      case when p_hours > 0 then p_family_id else null end,
+      abs(p_hours),
+      coalesce(p_note, 'Admin adjustment')
+    );
+
+  return v_new_bal;
+end;
+$$;
+
+-- ============================================================
 -- SEED: create the admin household
 -- After running this schema, sign up via the app with:
 --   email: lindsayomaits@gmail.com

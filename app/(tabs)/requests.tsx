@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, ActivityIndicator, Alert,
@@ -9,7 +9,7 @@ import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
-import { notifyFamily, notifyConnections } from '../../lib/notifications';
+import { notifyFamily } from '../../lib/notifications';
 import type { Request, RequestCategory } from '../../types';
 
 type Filter = 'open' | 'mine' | 'upcoming';
@@ -28,14 +28,14 @@ const ALL_CATEGORIES: { key: RequestCategory; emoji: string; label: string }[] =
 export default function RequestsScreen() {
   const { family, refreshFamily } = useAuth();
   const router = useRouter();
-  const params = useLocalSearchParams<{ postType?: string; filter?: string }>();
+  const params = useLocalSearchParams<{ filter?: string }>();
   const [requests, setRequests] = useState<Request[]>([]);
   const [connectedIds, setConnectedIds] = useState<string[]>([]);
-  const [postType, setPostType] = useState<'request' | 'offering'>('request');
   const [catFilter, setCatFilter] = useState<RequestCategory | 'all'>('all');
   const [filter, setFilter] = useState<Filter>('open');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const loadSeq = useRef(0);
 
   async function loadConnections() {
     if (!family) return;
@@ -52,13 +52,20 @@ export default function RequestsScreen() {
   }
 
   async function loadRequests() {
+    // Called after nearly every mutation plus on every filter/tab switch —
+    // overlapping calls can resolve out of order and a stale one can stomp
+    // a fresher result (e.g. approve an offer, but the in-flight reload
+    // from just before the tap wins and the approval seems to not show up
+    // until you leave and come back). Only the latest issued call commits.
+    const seq = ++loadSeq.current;
     const today = new Date().toISOString().split('T')[0];
     const ids = await loadConnections();
+    if (seq !== loadSeq.current) return;
 
     let query = supabase
       .from('requests')
       .select('*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*)')
-      .eq('post_type', postType)
+      .eq('post_type', 'request')
       .order('date', { ascending: true })
       .order('start_time', { ascending: true });
 
@@ -78,12 +85,14 @@ export default function RequestsScreen() {
     }
 
     const { data } = await query;
+    if (seq !== loadSeq.current) return;
     // Past-due (date already gone, still unresolved) sinks to the bottom
     // instead of cluttering the top of an ascending date sort.
     const sorted = [...(data ?? [])].sort((a, b) => {
       const aPast = a.status !== 'completed' && a.date < today;
       const bPast = b.status !== 'completed' && b.date < today;
       if (aPast !== bPast) return aPast ? 1 : -1;
+      if (!aPast && a.is_urgent !== b.is_urgent) return a.is_urgent ? -1 : 1;
       if (a.date !== b.date) return a.date < b.date ? -1 : 1;
       return a.start_time.localeCompare(b.start_time);
     });
@@ -92,22 +101,15 @@ export default function RequestsScreen() {
   }
 
   useEffect(() => {
-    if (params.postType === 'request' || params.postType === 'offering') setPostType(params.postType);
     if (params.filter === 'open' || params.filter === 'mine' || params.filter === 'upcoming') setFilter(params.filter);
-  }, [params.postType, params.filter]);
+  }, [params.filter]);
 
-  useFocusEffect(useCallback(() => { loadRequests(); }, [filter, postType, catFilter]));
+  useFocusEffect(useCallback(() => { loadRequests(); }, [filter, catFilter]));
 
   async function onRefresh() {
     setRefreshing(true);
     await loadRequests();
     setRefreshing(false);
-  }
-
-  function switchPostType(next: 'request' | 'offering') {
-    setPostType(next);
-    setFilter('open');
-    setLoading(true);
   }
 
   // ── Request flow ─────────────────────────────────────────────
@@ -143,7 +145,7 @@ export default function RequestsScreen() {
         text: 'Send offer', onPress: async () => {
           const { error } = await supabase.rpc('offer_request', { p_request_id: req.id, p_offering_family_id: family.id });
           if (error) return Alert.alert('Error', error.message);
-          await notifyFamily(req.requesting_family_id, '🙋 Someone offered to help!', `${family.name} offered to help — open the app to approve or decline`);
+          await notifyFamily(req.requesting_family_id, '🙋 Someone offered to help!', `${family.name} offered to help — open the app to approve or decline`, { path: `/(tabs)/requests?filter=mine` });
           await loadRequests();
         },
       },
@@ -160,7 +162,7 @@ export default function RequestsScreen() {
           text: 'Approve ✓', onPress: async () => {
             const { error } = await supabase.rpc('approve_offer', { p_request_id: req.id, p_requester_family_id: family.id });
             if (error) return Alert.alert('Error', error.message);
-            await notifyFamily(req.fulfilling_family_id!, '✅ Your offer was approved!', `${family.name} approved your offer for ${formatDate(req.date)}`);
+            await notifyFamily(req.fulfilling_family_id!, '✅ Your offer was approved!', `${family.name} approved your offer for ${formatDate(req.date)}`, { path: `/(tabs)/requests?filter=upcoming` });
             await Promise.all([loadRequests(), refreshFamily()]);
           },
         },
@@ -176,7 +178,7 @@ export default function RequestsScreen() {
         text: 'Decline', style: 'destructive', onPress: async () => {
           const { error } = await supabase.rpc('retract_offer', { p_request_id: req.id });
           if (error) return Alert.alert('Error', error.message);
-          if (req.fulfilling_family_id) await notifyFamily(req.fulfilling_family_id, '❌ Offer declined', `${family.name} passed on your offer — the request is back available`);
+          if (req.fulfilling_family_id) await notifyFamily(req.fulfilling_family_id, '❌ Offer declined', `${family.name} passed on your offer — the request is back available`, { path: `/(tabs)/requests?filter=open` });
           await loadRequests();
         },
       },
@@ -194,56 +196,6 @@ export default function RequestsScreen() {
     ]);
   }
 
-  // ── Offering flow ─────────────────────────────────────────────
-
-  async function claimOffering(req: Request) {
-    if (!family) return;
-    const earn = req.duration_hours;
-    Alert.alert('Claim this availability?',
-      `${req.requesting_family?.name} will help you on ${formatDate(req.date)}. If they approve, ${earn}h will be deducted from your balance.`,
-      [
-        { text: 'Not now', style: 'cancel' },
-        {
-          text: 'Claim it!', onPress: async () => {
-            const { error } = await supabase.rpc('offer_request', { p_request_id: req.id, p_offering_family_id: family.id });
-            if (error) return Alert.alert('Error', error.message);
-            await notifyFamily(req.requesting_family_id, '🙋 Someone claimed your availability!', `${family.name} wants your help — open the app to approve or decline`);
-            await loadRequests();
-          },
-        },
-      ]
-    );
-  }
-
-  async function approveOfferingClaim(req: Request) {
-    if (!family) return;
-    Alert.alert('Approve this claim?',
-      `${req.fulfilling_family?.name} wants your help on ${formatDate(req.date)}. You'll earn ${req.duration_hours}h.`,
-      [
-        { text: 'Not yet', style: 'cancel' },
-        {
-          text: 'Approve ✓', onPress: async () => {
-            const { error } = await supabase.rpc('approve_offering_claim', { p_request_id: req.id, p_offering_family_id: family.id });
-            if (error) return Alert.alert('Error', error.message);
-            await notifyFamily(req.fulfilling_family_id!, '✅ Claim approved!', `${family.name} confirmed — you're all set for ${formatDate(req.date)}`);
-            await Promise.all([loadRequests(), refreshFamily()]);
-          },
-        },
-      ]
-    );
-  }
-
-  async function withdrawClaim(req: Request) {
-    Alert.alert('Withdraw your claim?', 'The availability goes back to available.', [
-      { text: 'Keep it', style: 'cancel' },
-      { text: 'Withdraw', style: 'destructive', onPress: async () => {
-        const { error } = await supabase.rpc('retract_offer', { p_request_id: req.id });
-        if (error) return Alert.alert('Error', error.message);
-        await loadRequests();
-      }},
-    ]);
-  }
-
   // ── Shared actions ─────────────────────────────────────────────
 
   async function markCompleted(req: Request) {
@@ -251,10 +203,11 @@ export default function RequestsScreen() {
       { text: 'Not yet', style: 'cancel' },
       {
         text: 'Yes, done!', onPress: async () => {
-          const { error } = await supabase.from('requests').update({ status: 'completed' }).eq('id', req.id);
+          const { error } = await supabase.rpc('complete_request', { p_request_id: req.id });
           if (error) return Alert.alert('Error', error.message);
-          await notifyConnections(family?.id ?? '', '🎉 Completed!', `${req.fulfilling_family?.name} helped ${req.requesting_family?.name}`);
-          loadRequests();
+          const other = req.requesting_family_id === family?.id ? req.fulfilling_family_id : req.requesting_family_id;
+          if (other) await notifyFamily(other, '🎉 Marked completed', `"${req.title}" was marked completed — ${req.duration_hours}h settled.`, { path: `/(tabs)/requests?filter=upcoming` });
+          await Promise.all([loadRequests(), refreshFamily()]);
         },
       },
     ]);
@@ -268,6 +221,25 @@ export default function RequestsScreen() {
         loadRequests();
       }},
     ]);
+  }
+
+  async function reverseSettlement(req: Request) {
+    if (!family) return;
+    Alert.alert(
+      "Didn't happen?",
+      `This will undo the ${req.duration_hours}h that was already paid out for "${req.title}" and mark it cancelled.`,
+      [
+        { text: 'Never mind', style: 'cancel' },
+        {
+          text: 'Reverse', style: 'destructive', onPress: async () => {
+            const { error } = await supabase.rpc('reverse_settlement', { p_request_id: req.id });
+            if (error) return Alert.alert('Error', error.message);
+            if (req.fulfilling_family_id) await notifyFamily(req.fulfilling_family_id, '⚠️ Settlement reversed', `${family.name} reversed the payout for "${req.title}" — it didn't happen`, { path: `/(tabs)/requests?filter=mine` });
+            await Promise.all([loadRequests(), refreshFamily()]);
+          },
+        },
+      ]
+    );
   }
 
   async function cancelAcceptedRequest(req: Request) {
@@ -285,7 +257,7 @@ export default function RequestsScreen() {
           const { error } = await supabase.rpc('cancel_accepted_request', { p_request_id: req.id, p_family_id: family.id });
           if (error) return Alert.alert('Error', error.message);
           const other = isOwn ? req.fulfilling_family_id : req.requesting_family_id;
-          if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`);
+          if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`, { path: `/(tabs)/requests?filter=${isOwn ? 'open' : 'mine'}` });
           await Promise.all([loadRequests(), refreshFamily()]);
         },
       },
@@ -300,7 +272,7 @@ export default function RequestsScreen() {
 
   function statusBadge(status: Request['status']) {
     const map: Record<string, { bg: string; text: string; label: string }> = {
-      open:      { bg: colors.greenLight,  text: '#059669',    label: 'Available' },
+      open:      { bg: colors.greenLight,  text: colors.sageDark, label: 'Available' },
       offered:   { bg: colors.amberLight,  text: colors.amber, label: 'Pending' },
       accepted:  { bg: colors.blueLight,   text: colors.blue,  label: 'Accepted' },
       completed: { bg: colors.purpleLight, text: colors.purple, label: 'Completed' },
@@ -317,9 +289,9 @@ export default function RequestsScreen() {
       manual_labor:      { bg: colors.amberLight,  text: colors.amber,    label: '🔨 Labor · 2× rate' },
       professional:      { bg: colors.sageLight,   text: colors.sageDark, label: '🎓 Professional' },
       cooking:           { bg: colors.purpleLight, text: colors.purple,   label: '🍳 Cooking' },
-      elder_care:        { bg: '#FEF3C7',           text: '#92400E',       label: '🤝 Elder care' },
-      physical_training: { bg: '#D1FAE5',           text: '#065F46',       label: '🏃 Fitness' },
-      errands:           { bg: '#E0F2FE',           text: '#0369A1',       label: '🛒 Errands' },
+      elder_care:        { bg: colors.amberLight,   text: colors.amber,    label: '🤝 Elder care' },
+      physical_training: { bg: colors.greenLight,   text: colors.sageDark, label: '🏃 Fitness' },
+      errands:           { bg: colors.blueLight,    text: colors.blue,     label: '🛒 Errands' },
     };
     const c = cfg[category];
     if (!c) return null;
@@ -329,8 +301,6 @@ export default function RequestsScreen() {
   // ── Card ───────────────────────────────────────────────────────
 
   const renderItem = ({ item }: { item: Request }) => {
-    const isOffering = item.post_type === 'offering';
-    // For requests: isOwn = the one who needs help. For offerings: isOwn = the one who can help.
     const isOwn = item.requesting_family_id === family?.id;
     const isFulfiller = item.fulfilling_family_id === family?.id;
     const isConfirmed = item.status === 'accepted' || item.status === 'completed';
@@ -341,16 +311,21 @@ export default function RequestsScreen() {
     const showContact = (hasOffer || isConfirmed) && contactFamily;
 
     return (
-      <View style={[styles.card, isOffering && styles.cardOffering, isPastDue && styles.cardPastDue]}>
+      <TouchableOpacity
+        activeOpacity={0.85}
+        onPress={() => router.push(`/request/${item.id}`)}
+        style={[styles.card, isPastDue && styles.cardPastDue, item.is_urgent && !isPastDue && styles.cardUrgent]}
+      >
+        {item.is_urgent && !isPastDue && (
+          <View style={styles.urgentBanner}><Text style={styles.urgentBannerText}>❗️ URGENT</Text></View>
+        )}
         <View style={styles.cardHeader}>
           <Text style={[styles.cardTitle, isPastDue && styles.cardTitlePastDue]}>{item.title}</Text>
           {isPastDue ? <View style={[styles.badge, styles.pastDueBadge]}><Text style={[styles.badgeText, styles.pastDueBadgeText]}>⏰ Past date</Text></View> : statusBadge(item.status)}
         </View>
 
         <Text style={styles.cardFamily}>
-          {isOwn
-            ? isOffering ? 'Your availability' : 'Your request'
-            : isOffering ? `${item.requesting_family?.name} can help` : item.requesting_family?.name}
+          {isOwn ? 'Your request' : item.requesting_family?.name}
           {item.category === 'kid_sit' && item.kid_name ? `  ·  ${item.kid_name}` : ''}
         </Text>
 
@@ -392,15 +367,7 @@ export default function RequestsScreen() {
           return d.errand_type ? <Text style={styles.catDetailText}>{d.errand_type}</Text> : null;
         })()}
 
-        {isOffering ? (
-          <View style={styles.cardMeta}>
-            <Text style={styles.metaText}>
-              📅 From {formatDate(item.date)}{item.end_date ? ` · Until ${formatDate(item.end_date)}` : ' · Open-ended'}
-            </Text>
-            <Text style={styles.metaText}>🕐 {item.start_time}</Text>
-            <Text style={styles.metaText}>⏱ Up to {item.duration_hours}h</Text>
-          </View>
-        ) : item.is_overnight ? (
+        {item.is_overnight ? (
           <View style={styles.cardMeta}>
             <Text style={styles.metaText}>📥 Drop-off: {formatDate(item.date)} at {item.start_time}</Text>
             {item.end_date && <Text style={styles.metaText}>📤 Pick-up: {formatDate(item.end_date)} at {item.end_time}</Text>}
@@ -433,15 +400,13 @@ export default function RequestsScreen() {
         {showContact && (
           <View style={styles.contactBox}>
             <Text style={styles.contactTitle}>
-              {isOffering
-                ? isOwn ? '🙋 Claimed by' : '🙋 Helper'
-                : isOwn ? (hasOffer && !isConfirmed ? '🙋 Offered by' : '👤 Your helper') : '👨‍👩‍👧 Family'}
+              {isOwn ? (hasOffer && !isConfirmed ? '🙋 Offered by' : '👤 Your helper') : '👨‍👩‍👧 Family'}
             </Text>
             <Text style={styles.contactName}>{contactFamily!.name}</Text>
-            {contactFamily!.parent1_name
-              ? <Text style={styles.contactLine}>👤 {contactFamily!.parent1_name}{contactFamily!.parent1_phone ? `  ·  📞 ${contactFamily!.parent1_phone}` : ''}</Text>
-              : contactFamily!.phone ? <Text style={styles.contactLine}>📞 {contactFamily!.phone}</Text> : null}
-            {contactFamily!.parent2_name && <Text style={styles.contactLine}>👤 {contactFamily!.parent2_name}{contactFamily!.parent2_phone ? `  ·  📞 ${contactFamily!.parent2_phone}` : ''}</Text>}
+            {contactFamily!.parent1_name && <Text style={styles.contactLine}>👤 {contactFamily!.parent1_name}</Text>}
+            {(contactFamily!.parent1_phone || contactFamily!.phone) && (
+              <Text style={styles.contactLine}>📞 {contactFamily!.parent1_phone || contactFamily!.phone}</Text>
+            )}
             <Text style={styles.contactLine}>✉️ {contactFamily!.email}</Text>
             {contactFamily!.address && <Text style={styles.contactLine}>🏠 {contactFamily!.address}</Text>}
           </View>
@@ -449,86 +414,59 @@ export default function RequestsScreen() {
 
         {/* ── Actions ── */}
         <View style={styles.cardActions}>
-          {!isOffering && (
-            <>
-              {item.status === 'open' && !isOwn && (
-                <TouchableOpacity style={[styles.offerBtn, item.category === 'manual_labor' && { backgroundColor: colors.amber }]} onPress={() => offerRequest(item)}>
-                  <Text style={styles.offerBtnText}>
-                    {item.category === 'manual_labor' ? `Offer to help — Earn ${item.duration_hours}h (2×) 🔨`
-                      : item.category === 'dog' ? `Offer to help — Earn ${item.duration_hours}h 🐕`
-                      : item.category === 'professional' ? `Offer to help — Earn ${item.duration_hours}h 🎓`
-                      : item.category === 'cooking' ? `Offer to help — Earn ${item.duration_hours}h 🍳`
-                      : `Offer to help — Earn ${item.duration_hours}h ⭐`}
-                  </Text>
-                </TouchableOpacity>
-              )}
-              {item.status === 'open' && isOwn && (
-                <View style={styles.openOwnActions}>
-                  <TouchableOpacity style={styles.editBtn} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: item.id } })}>
-                    <Text style={styles.editBtnText}>Edit</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.cancelBtn} onPress={() => cancelRequest(item)}>
-                    <Text style={styles.cancelBtnText}>Cancel Request</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {item.status === 'offered' && isOwn && (
-                <View style={styles.offeredActions}>
-                  <Text style={styles.offeredPrompt}>{item.fulfilling_family?.name} wants to help — approve to confirm!</Text>
-                  <TouchableOpacity style={styles.approveBtn} onPress={() => approveOffer(item)}>
-                    <Text style={styles.approveBtnText}>Approve ✓</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.declineBtn} onPress={() => declineOffer(item)}>
-                    <Text style={styles.declineBtnText}>Decline offer</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {item.status === 'offered' && isFulfiller && (
-                <TouchableOpacity style={styles.withdrawBtn} onPress={() => withdrawOffer(item)}>
-                  <Text style={styles.withdrawBtnText}>Withdraw my offer</Text>
-                </TouchableOpacity>
-              )}
-              {item.status === 'offered' && !isOwn && !isFulfiller && (
-                <View style={styles.offeredElsewhere}><Text style={styles.offeredElsewhereText}>Offer pending approval</Text></View>
-              )}
-            </>
+          {item.status === 'open' && !isOwn && (
+            <TouchableOpacity style={[styles.offerBtn, item.category === 'manual_labor' && { backgroundColor: colors.amber }]} onPress={() => offerRequest(item)}>
+              <Text style={styles.offerBtnText}>
+                {item.category === 'manual_labor' ? `Offer to help — Earn ${item.duration_hours}h (2×) 🔨`
+                  : item.category === 'dog' ? `Offer to help — Earn ${item.duration_hours}h 🐕`
+                  : item.category === 'professional' ? `Offer to help — Earn ${item.duration_hours}h 🎓`
+                  : item.category === 'cooking' ? `Offer to help — Earn ${item.duration_hours}h 🍳`
+                  : `Offer to help — Earn ${item.duration_hours}h ⭐`}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {item.status === 'open' && isOwn && (
+            <View style={styles.openOwnActions}>
+              <TouchableOpacity style={styles.editBtn} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: item.id } })}>
+                <Text style={styles.editBtnText}>Edit</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => cancelRequest(item)}>
+                <Text style={styles.cancelBtnText}>Cancel Request</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {item.status === 'offered' && isOwn && (
+            <View style={styles.offeredActions}>
+              <Text style={styles.offeredPrompt}>{item.fulfilling_family?.name} wants to help — approve to confirm!</Text>
+              <TouchableOpacity style={styles.approveBtn} onPress={() => approveOffer(item)}>
+                <Text style={styles.approveBtnText}>Approve ✓</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.declineBtn} onPress={() => declineOffer(item)}>
+                <Text style={styles.declineBtnText}>Decline offer</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {item.status === 'offered' && isFulfiller && (
+            <TouchableOpacity style={styles.withdrawBtn} onPress={() => withdrawOffer(item)}>
+              <Text style={styles.withdrawBtnText}>Withdraw my offer</Text>
+            </TouchableOpacity>
+          )}
+          {item.status === 'offered' && !isOwn && !isFulfiller && (
+            <View style={styles.offeredElsewhere}><Text style={styles.offeredElsewhereText}>Offer pending approval</Text></View>
           )}
 
-          {isOffering && (
-            <>
-              {item.status === 'open' && !isOwn && (
-                <TouchableOpacity style={styles.claimBtn} onPress={() => claimOffering(item)}>
-                  <Text style={styles.claimBtnText}>Claim this — costs {item.duration_hours}h 🙋</Text>
+          {(item.status === 'accepted' || item.status === 'completed') && item.settled_at && !item.reversed_at && (
+            <View style={styles.settledBox}>
+              <Text style={styles.settledText}>✅ Settled — {item.duration_hours}h paid out</Text>
+              {isOwn && (
+                <TouchableOpacity style={styles.reverseBtn} onPress={() => reverseSettlement(item)}>
+                  <Text style={styles.reverseBtnText}>Didn't happen? Reverse</Text>
                 </TouchableOpacity>
               )}
-              {item.status === 'open' && isOwn && (
-                <TouchableOpacity style={styles.cancelBtn} onPress={() => cancelRequest(item)}>
-                  <Text style={styles.cancelBtnText}>Cancel Availability</Text>
-                </TouchableOpacity>
-              )}
-              {item.status === 'offered' && isOwn && (
-                <View style={styles.offeredActions}>
-                  <Text style={styles.offeredPrompt}>{item.fulfilling_family?.name} wants your help — approve to confirm!</Text>
-                  <TouchableOpacity style={styles.approveBtn} onPress={() => approveOfferingClaim(item)}>
-                    <Text style={styles.approveBtnText}>Approve ✓</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.declineBtn} onPress={() => declineOffer(item)}>
-                    <Text style={styles.declineBtnText}>Decline claim</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {item.status === 'offered' && isFulfiller && (
-                <TouchableOpacity style={styles.withdrawBtn} onPress={() => withdrawClaim(item)}>
-                  <Text style={styles.withdrawBtnText}>Withdraw my claim</Text>
-                </TouchableOpacity>
-              )}
-              {item.status === 'offered' && !isOwn && !isFulfiller && (
-                <View style={styles.offeredElsewhere}><Text style={styles.offeredElsewhereText}>Claim pending approval</Text></View>
-              )}
-            </>
+            </View>
           )}
 
-          {item.status === 'accepted' && (isOwn || isFulfiller) && (
+          {item.status === 'accepted' && !item.settled_at && (isOwn || isFulfiller) && (
             <View style={styles.acceptedActions}>
               <TouchableOpacity style={styles.completeBtn} onPress={() => markCompleted(item)}>
                 <Text style={styles.completeBtnText}>Mark as Completed ✓</Text>
@@ -539,32 +477,22 @@ export default function RequestsScreen() {
             </View>
           )}
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 
   const statusFilters: { key: Filter; label: string }[] = [
-    { key: 'open',     label: postType === 'offering' ? 'Village Offers' : 'Village Requests' },
-    { key: 'mine',     label: postType === 'offering' ? 'My Offers' : 'My Requests' },
-    { key: 'upcoming', label: postType === 'offering' ? 'My Scheduled Offers' : 'My Scheduled Requests' },
+    { key: 'open',     label: 'Village Requests' },
+    { key: 'mine',     label: 'My Requests' },
+    { key: 'upcoming', label: 'My Scheduled Requests' },
   ];
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>Posts</Text>
+        <Text style={styles.title}>Requests</Text>
         <TouchableOpacity style={styles.newBtn} onPress={() => router.push('/new-request')}>
-          <Text style={styles.newBtnText}>+ New Post</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Post type toggle */}
-      <View style={styles.postTypeRow}>
-        <TouchableOpacity style={[styles.postTypeBtn, postType === 'request' && styles.postTypeBtnActive]} onPress={() => switchPostType('request')}>
-          <Text style={[styles.postTypeText, postType === 'request' && styles.postTypeTextActive]}>Requests</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.postTypeBtn, postType === 'offering' && styles.postTypeBtnActiveGreen]} onPress={() => switchPostType('offering')}>
-          <Text style={[styles.postTypeText, postType === 'offering' && styles.postTypeTextActiveGreen]}>Offers</Text>
+          <Text style={styles.newBtnText}>+ New Request</Text>
         </TouchableOpacity>
       </View>
 
@@ -607,11 +535,9 @@ export default function RequestsScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
           ListEmptyComponent={
             <View style={styles.empty}>
-              <Text style={styles.emptyIcon}>{filter === 'upcoming' ? '🗓️' : postType === 'offering' ? '🙋' : '📭'}</Text>
+              <Text style={styles.emptyIcon}>{filter === 'upcoming' ? '🗓️' : '📭'}</Text>
               <Text style={styles.emptyText}>
-                {filter === 'upcoming' ? 'Nothing scheduled yet'
-                  : postType === 'offering' ? 'No availability posted yet'
-                  : 'No requests here yet'}
+                {filter === 'upcoming' ? 'Nothing scheduled yet' : 'No requests here yet'}
               </Text>
             </View>
           }
@@ -628,19 +554,10 @@ const styles = StyleSheet.create({
   newBtn: { backgroundColor: colors.primary, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 9 },
   newBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 
-  // Post type toggle
-  postTypeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 20, marginBottom: 10 },
-  postTypeBtn: { flex: 1, paddingVertical: 9, borderRadius: 12, alignItems: 'center', borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.card },
-  postTypeBtnActive: { backgroundColor: colors.primaryLight, borderColor: colors.primary },
-  postTypeBtnActiveGreen: { backgroundColor: colors.greenLight, borderColor: colors.green },
-  postTypeText: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
-  postTypeTextActive: { color: colors.primaryDark },
-  postTypeTextActiveGreen: { color: '#059669' },
-
   // Category filter
   catRow: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 20, gap: 6, marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
   catChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.borderLight },
-  catChipActive: { backgroundColor: colors.sage, borderColor: colors.sage },
+  catChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   catChipText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
   catChipTextActive: { color: '#fff' },
 
@@ -653,8 +570,10 @@ const styles = StyleSheet.create({
 
   list: { paddingHorizontal: 20, paddingBottom: 32 },
   card: { backgroundColor: colors.card, borderRadius: 18, padding: 16, marginBottom: 12, borderWidth: 1.5, borderColor: colors.borderLight, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
-  cardOffering: { borderColor: colors.green + '60', borderWidth: 1.5 },
   cardPastDue: { opacity: 0.55, borderColor: colors.red + '60', shadowOpacity: 0 },
+  cardUrgent: { borderColor: colors.red, borderWidth: 2 },
+  urgentBanner: { backgroundColor: colors.red, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, alignSelf: 'flex-start', marginBottom: 6 },
+  urgentBannerText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 },
   cardTitle: { fontSize: 16, fontWeight: '700', color: colors.text, flex: 1, marginRight: 8 },
   cardTitlePastDue: { color: colors.textMuted },
@@ -669,8 +588,8 @@ const styles = StyleSheet.create({
   catBadge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
   catBadgeText: { fontSize: 12, fontWeight: '700' },
   catDetailText: { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginBottom: 6 },
-  overnightBadge: { backgroundColor: '#EDE9FE', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
-  overnightBadgeText: { color: '#6D28D9', fontSize: 12, fontWeight: '700' },
+  overnightBadge: { backgroundColor: colors.purpleLight, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
+  overnightBadgeText: { color: colors.purple, fontSize: 12, fontWeight: '700' },
   flexibleBadge: { backgroundColor: colors.sageLight, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
   flexibleBadgeText: { color: colors.sageDark, fontSize: 12, fontWeight: '700' },
   contactBox: { backgroundColor: colors.sageLight, borderRadius: 12, padding: 12, marginVertical: 8, borderWidth: 1, borderColor: colors.sage + '40' },
@@ -682,18 +601,16 @@ const styles = StyleSheet.create({
   // Action buttons
   offerBtn: { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 12, alignItems: 'center', shadowColor: colors.primary, shadowOpacity: 0.2, shadowRadius: 6, elevation: 2 },
   offerBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  claimBtn: { backgroundColor: colors.green, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
-  claimBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   openOwnActions: { gap: 8 },
   editBtn: { borderWidth: 1.5, borderColor: colors.border, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
   editBtnText: { color: colors.text, fontWeight: '700', fontSize: 14 },
-  cancelBtn: { borderWidth: 1.5, borderColor: '#FCA5A5', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
+  cancelBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
   cancelBtnText: { color: colors.red, fontWeight: '700', fontSize: 14 },
   offeredActions: { gap: 8 },
   offeredPrompt: { fontSize: 13, color: colors.text, fontWeight: '600', marginBottom: 4, textAlign: 'center' },
   approveBtn: { backgroundColor: colors.green, borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   approveBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
-  declineBtn: { borderWidth: 1.5, borderColor: '#FCA5A5', borderRadius: 12, paddingVertical: 11, alignItems: 'center' },
+  declineBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 12, paddingVertical: 11, alignItems: 'center' },
   declineBtnText: { color: colors.red, fontWeight: '600', fontSize: 13 },
   withdrawBtn: { borderWidth: 1.5, borderColor: colors.border, borderRadius: 12, paddingVertical: 11, alignItems: 'center' },
   withdrawBtnText: { color: colors.textSecondary, fontWeight: '600', fontSize: 13 },
@@ -701,9 +618,13 @@ const styles = StyleSheet.create({
   offeredElsewhereText: { fontSize: 13, color: colors.textMuted, fontWeight: '500' },
   acceptedActions: { gap: 8 },
   completeBtn: { backgroundColor: colors.greenLight, borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1.5, borderColor: colors.green },
-  completeBtnText: { color: '#059669', fontWeight: '700', fontSize: 14 },
-  backOutBtn: { borderWidth: 1.5, borderColor: '#FCA5A5', borderRadius: 12, paddingVertical: 10, alignItems: 'center' },
+  completeBtnText: { color: colors.sageDark, fontWeight: '700', fontSize: 14 },
+  backOutBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 12, paddingVertical: 10, alignItems: 'center' },
   backOutBtnText: { color: colors.red, fontWeight: '600', fontSize: 13 },
+  settledBox: { backgroundColor: colors.greenLight, borderRadius: 12, borderWidth: 1.5, borderColor: colors.green, padding: 12, gap: 8 },
+  settledText: { color: colors.sageDark, fontWeight: '700', fontSize: 13, textAlign: 'center' },
+  reverseBtn: { alignItems: 'center', paddingVertical: 6 },
+  reverseBtnText: { color: colors.textMuted, fontWeight: '600', fontSize: 12, textDecorationLine: 'underline' },
 
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyIcon: { fontSize: 48, marginBottom: 12 },

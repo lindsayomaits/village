@@ -1,13 +1,21 @@
 export type KidEntry = {
   name: string;
   birthday: string | null; // ISO "YYYY-MM-DD"
+  notes: string | null;
+};
+
+export type PetEntry = {
+  name: string;
+  animal: string;
+  size: 'Small' | 'Medium' | 'Large' | null;
+  notes: string | null;
 };
 
 export type Family = {
   id: string;
   user_id: string;
-  partner_user_id: string | null;
   kids_data: KidEntry[] | null;
+  pets_data: PetEntry[] | null;
   name: string;
   email: string;
   hours_balance: number;
@@ -15,8 +23,8 @@ export type Family = {
   is_active: boolean;
   connect_code: string | null;
   discoverable: boolean;
+  photo_url: string | null;
   push_token: string | null;
-  partner_push_token: string | null;
   phone: string | null;
   kids_info: string | null;
   animal: string | null;
@@ -24,10 +32,17 @@ export type Family = {
   services_offered: string[] | null;
   parent1_name: string | null;
   parent1_phone: string | null;
-  parent2_name: string | null;
-  parent2_phone: string | null;
   address: string | null;
   emergency_contact: string | null;
+  created_at: string;
+};
+
+export type Partnership = {
+  id: string;
+  profile_a_id: string;
+  profile_b_id: string;
+  profile_a?: Family;
+  profile_b?: Family;
   created_at: string;
 };
 
@@ -48,12 +63,44 @@ export type Post = {
   reactions?: PostReaction[];
 };
 
+export type DMReaction = {
+  id: string;
+  message_id: string;
+  family_id: string;
+  emoji: string;
+  created_at: string;
+};
+
 export type DirectMessage = {
   id: string;
   from_family_id: string;
   to_family_id: string;
   body: string;
   read_at: string | null;
+  created_at: string;
+  reactions?: DMReaction[];
+};
+
+export type GroupChat = {
+  id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+};
+
+export type GroupChatMember = {
+  group_id: string;
+  family_id: string;
+  joined_at: string;
+  family?: Family;
+};
+
+export type GroupMessage = {
+  id: string;
+  group_id: string;
+  from_family_id: string;
+  from_family?: Family;
+  body: string;
   created_at: string;
 };
 
@@ -84,6 +131,7 @@ export type Request = {
   fulfilling_family_id: string | null;
   fulfilling_family?: Family;
   is_overnight: boolean;
+  is_urgent: boolean;
   end_date: string | null;
   end_time: string | null;
   category: RequestCategory;
@@ -91,6 +139,8 @@ export type Request = {
   post_type: 'request' | 'offering';
   target_household_id: string | null;
   target_household?: Family;
+  settled_at: string | null;
+  reversed_at: string | null;
   created_at: string;
 };
 
@@ -105,8 +155,6 @@ export type Transaction = {
   note: string | null;
   created_at: string;
 };
-
-export type MentionTarget = 'primary' | 'partner' | 'both';
 
 export type Connection = {
   id: string;

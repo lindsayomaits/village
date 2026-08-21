@@ -12,6 +12,13 @@ import { colors } from '../lib/theme';
 import type { Request, RequestCategory } from '../types';
 
 const DURATION_OPTIONS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8];
+const TIME_PREFS = [
+  { key: 'morning',   label: 'Morning',   sub: '8am–12pm' },
+  { key: 'afternoon', label: 'Afternoon', sub: '12pm–5pm' },
+  { key: 'evening',   label: 'Evening',   sub: '5pm–9pm' },
+  { key: 'flexible',  label: 'Flexible',  sub: 'Any time works' },
+] as const;
+const DAYS_OF_WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 const CATEGORIES: { key: RequestCategory; emoji: string; label: string; sub: string }[] = [
   { key: 'kid_sit',           emoji: '👧', label: 'Kid-sitting',      sub: 'Watching kids at home' },
@@ -101,8 +108,21 @@ function parseTimeStr(timeStr: string): Date {
   let hours = h;
   if (isPM && h !== 12) hours += 12;
   if (isAM && h === 12) hours = 0;
+  // start_time is free text ("Morning · Mon, Tue") for a flexible-timing
+  // request, not a real clock time — falls through here as NaN. Fall back
+  // instead of handing an Invalid Date to the native time picker, which
+  // crashes/hangs the edit screen.
+  if (!Number.isFinite(hours)) { d.setHours(9, 0, 0, 0); return d; }
   d.setHours(hours, m || 0, 0, 0);
   return d;
+}
+// Reverses the "{TimePrefLabel} · {Day, Day}" format new-request.tsx
+// writes for a flexible-timing start_time, back into a pref key + days.
+function parseFlexibleTimeLabel(label: string): { pref: typeof TIME_PREFS[number]['key']; days: string[] } {
+  const [prefLabel, daysPart] = label.split(' · ');
+  const pref = TIME_PREFS.find(t => t.label === prefLabel)?.key ?? 'flexible';
+  const days = daysPart ? daysPart.split(',').map(s => s.trim()).filter(Boolean) : [];
+  return { pref, days };
 }
 function calcOvernightHours(dropoffDate: Date, dropoffTime: Date, pickupDate: Date, pickupTime: Date) {
   const dropoff = new Date(
@@ -164,6 +184,11 @@ export default function EditRequestScreen() {
 
   // timing flexible
   const [timingFlexible, setTimingFlexible] = useState(false);
+  const [requestTimePref, setRequestTimePref] = useState<typeof TIME_PREFS[number]['key']>('flexible');
+  const [requestDays, setRequestDays] = useState<string[]>([]);
+  const [flexEndDate, setFlexEndDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() + 7); return d; });
+  const [showFlexEndDatePicker, setShowFlexEndDatePicker] = useState(false);
+  const [isUrgent, setIsUrgent] = useState(false);
 
   // Date / time / duration
   const [date, setDate] = useState(new Date());
@@ -193,6 +218,7 @@ export default function EditRequestScreen() {
       setNotes(req.notes ?? '');
       setKidName(req.kid_name ?? '');
       setIsOvernight(req.is_overnight ?? false);
+      setIsUrgent(req.is_urgent ?? false);
       if ((req.category ?? 'kid_sit') === 'kid_sit' && req.category_details) {
         const d = req.category_details as { location?: 'kids_house' | 'sitters_house' };
         setKidLocation(d.location ?? null);
@@ -254,7 +280,20 @@ export default function EditRequestScreen() {
         if (req.end_time) setPickupTime(parseTimeStr(req.end_time));
       } else {
         setDate(parseDateStr(req.date));
-        setStartTime(parseTimeStr(req.start_time));
+        // start_time is a free-text label ("Morning · Mon, Tue"), not a
+        // clock time, when this request was posted with flexible timing —
+        // read timing_flexible straight off category_details rather than
+        // the timingFlexible state var, since that setter above hasn't
+        // flushed yet within this same effect.
+        const isFlexible = !!(req.category_details as { timing_flexible?: boolean } | null)?.timing_flexible;
+        if (isFlexible) {
+          const { pref, days } = parseFlexibleTimeLabel(req.start_time);
+          setRequestTimePref(pref);
+          setRequestDays(days);
+          if (req.end_date) setFlexEndDate(parseDateStr(req.end_date));
+        } else {
+          setStartTime(parseTimeStr(req.start_time));
+        }
         const cat = req.category ?? 'kid_sit';
         const rawHours = cat === 'manual_labor' ? req.duration_hours / 2 : req.duration_hours;
         const matched = DURATION_OPTIONS.find(h => h === rawHours);
@@ -292,6 +331,9 @@ export default function EditRequestScreen() {
     if (category === 'kid_sit' && isOvernight && overnight.actualHours <= 0) {
       return Alert.alert('Invalid times', 'Pickup must be after drop-off.');
     }
+    if (timingFlexible && flexEndDate < date) {
+      return Alert.alert('Invalid window', '"To" date must be on or after the "From" date.');
+    }
 
     const resolvedService = serviceType === 'other'
       ? serviceOther.trim()
@@ -324,18 +366,23 @@ export default function EditRequestScreen() {
       : category === 'errands'         ? { errand_type: resolvedErrand, timing_flexible: timingFlexible || undefined }
       : null;
 
+    const isFixedDateCategory = (category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight;
+    const flexTimePrefBase = TIME_PREFS.find(t => t.key === requestTimePref)?.label ?? 'Flexible';
+    const flexStartTime = requestDays.length > 0 ? `${flexTimePrefBase} · ${requestDays.join(', ')}` : flexTimePrefBase;
+
     setSaving(true);
     const { error } = await supabase.from('requests').update({
       category,
       category_details: categoryDetails,
       title: title.trim(),
       kid_name: category === 'kid_sit' ? (kidName.trim() || null) : null,
-      date: ((category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight) ? toDateOnly(dropoffDate) : toDateOnly(date),
-      start_time: ((category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight) ? toTimeDisplay(dropoffTime) : toTimeDisplay(startTime),
-      end_date: ((category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight) ? toDateOnly(pickupDate) : null,
-      end_time: ((category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight) ? toTimeDisplay(pickupTime) : null,
+      date: isFixedDateCategory ? toDateOnly(dropoffDate) : toDateOnly(date),
+      start_time: isFixedDateCategory ? toTimeDisplay(dropoffTime) : timingFlexible ? flexStartTime : toTimeDisplay(startTime),
+      end_date: isFixedDateCategory ? toDateOnly(pickupDate) : timingFlexible ? toDateOnly(flexEndDate) : null,
+      end_time: isFixedDateCategory ? toTimeDisplay(pickupTime) : null,
       duration_hours: chargedHours,
-      is_overnight: (category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight,
+      is_overnight: isFixedDateCategory,
+      is_urgent: isUrgent,
       notes: notes.trim() || null,
     }).eq('id', requestId);
 
@@ -626,6 +673,20 @@ export default function EditRequestScreen() {
             </View>
           )}
 
+          {/* Urgent toggle */}
+          <View style={[styles.flexibleRow, { backgroundColor: colors.redLight, borderColor: colors.red + '40' }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.flexibleLabel, { color: colors.red }]}>❗️ Mark as urgent</Text>
+              <Text style={styles.flexibleSub}>For time-sensitive needs — stands out and sorts to the top</Text>
+            </View>
+            <Switch
+              value={isUrgent}
+              onValueChange={setIsUrgent}
+              trackColor={{ false: colors.border, true: colors.red }}
+              thumbColor="#fff"
+            />
+          </View>
+
           {/* Date / time / duration */}
           {(category === 'kid_sit' || (category === 'dog' && dogTask === 'boarding')) && isOvernight ? (
             <>
@@ -677,28 +738,87 @@ export default function EditRequestScreen() {
             </>
           ) : (
             <>
-              <Text style={styles.label}>
-                {timingFlexible ? 'Preferred date' : 'Date'} <Text style={styles.required}>*</Text>
-              </Text>
-              <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowDatePicker(true)}>
-                <Text style={styles.pickerIcon}>📅</Text>
-                <Text style={styles.pickerText}>{toDateDisplay(date)}</Text>
-              </TouchableOpacity>
-              {showDatePicker && (
-                <DateTimePicker value={date} mode="date" minimumDate={new Date()}
-                  onChange={(_, s) => { setShowDatePicker(false); if (s) setDate(s); }} />
+              {timingFlexible ? (
+                <>
+                  <Text style={styles.label}>Window <Text style={styles.required}>*</Text></Text>
+                  <View style={styles.rowPickers}>
+                    <TouchableOpacity style={[styles.pickerBtn, { flex: 1 }]} onPress={() => setShowDatePicker(true)}>
+                      <Text style={styles.pickerIcon}>📅</Text>
+                      <Text style={styles.pickerText}>{toDateDisplay(date)}</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.windowToText}>to</Text>
+                    <TouchableOpacity style={[styles.pickerBtn, { flex: 1 }]} onPress={() => setShowFlexEndDatePicker(true)}>
+                      <Text style={styles.pickerIcon}>📅</Text>
+                      <Text style={styles.pickerText}>{toDateDisplay(flexEndDate)}</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {showDatePicker && (
+                    <DateTimePicker value={date} mode="date" minimumDate={new Date()}
+                      onChange={(_, s) => { setShowDatePicker(false); if (s) setDate(s); }} />
+                  )}
+                  {showFlexEndDatePicker && (
+                    <DateTimePicker value={flexEndDate} mode="date" minimumDate={date}
+                      onChange={(_, s) => { setShowFlexEndDatePicker(false); if (s) setFlexEndDate(s); }} />
+                  )}
+                  <Text style={styles.flexibleNote}>Other families will know you're open to any time in this window</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.label}>Date <Text style={styles.required}>*</Text></Text>
+                  <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowDatePicker(true)}>
+                    <Text style={styles.pickerIcon}>📅</Text>
+                    <Text style={styles.pickerText}>{toDateDisplay(date)}</Text>
+                  </TouchableOpacity>
+                  {showDatePicker && (
+                    <DateTimePicker value={date} mode="date" minimumDate={new Date()}
+                      onChange={(_, s) => { setShowDatePicker(false); if (s) setDate(s); }} />
+                  )}
+                </>
               )}
-              {timingFlexible && <Text style={styles.flexibleNote}>Other families will know you're open to other times</Text>}
               <Text style={styles.label}>
-                {timingFlexible ? 'Preferred time' : 'Start Time'} <Text style={styles.required}>*</Text>
+                {timingFlexible ? 'Time of day' : 'Start Time'} <Text style={styles.required}>*</Text>
               </Text>
-              <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowTimePicker(true)}>
-                <Text style={styles.pickerIcon}>🕐</Text>
-                <Text style={styles.pickerText}>{toTimeDisplay(startTime)}</Text>
-              </TouchableOpacity>
-              {showTimePicker && (
-                <DateTimePicker value={startTime} mode="time"
-                  onChange={(_, s) => { setShowTimePicker(false); if (s) setStartTime(s); }} />
+              {timingFlexible ? (
+                <View style={styles.durationGrid}>
+                  {TIME_PREFS.map(tp => (
+                    <TouchableOpacity
+                      key={tp.key}
+                      style={[styles.durationBtn, requestTimePref === tp.key && styles.durationBtnActive]}
+                      onPress={() => setRequestTimePref(tp.key)}
+                    >
+                      <Text style={[styles.durationText, requestTimePref === tp.key && styles.durationTextActive]}>{tp.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ) : (
+                <>
+                  <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowTimePicker(true)}>
+                    <Text style={styles.pickerIcon}>🕐</Text>
+                    <Text style={styles.pickerText}>{toTimeDisplay(startTime)}</Text>
+                  </TouchableOpacity>
+                  {showTimePicker && (
+                    <DateTimePicker value={startTime} mode="time"
+                      onChange={(_, s) => { setShowTimePicker(false); if (s) setStartTime(s); }} />
+                  )}
+                </>
+              )}
+              {timingFlexible && (
+                <>
+                  <Text style={styles.label}>Days (optional)</Text>
+                  <View style={styles.durationGrid}>
+                    {DAYS_OF_WEEK.map(day => {
+                      const selected = requestDays.includes(day);
+                      return (
+                        <TouchableOpacity key={day}
+                          style={[styles.durationBtn, selected && styles.durationBtnActive]}
+                          onPress={() => setRequestDays(prev => selected ? prev.filter(d => d !== day) : [...prev, day])}>
+                          <Text style={[styles.durationText, selected && styles.durationTextActive]}>{day}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  <Text style={styles.flexibleNote}>Leave blank if any day works</Text>
+                </>
               )}
               <Text style={styles.label}>{category === 'manual_labor' ? 'Estimated hours' : 'Duration'}</Text>
               <View style={styles.durationGrid}>
@@ -820,6 +940,7 @@ const styles = StyleSheet.create({
   flexibleLabel: { fontSize: 15, fontWeight: '700', color: colors.sageDark },
   flexibleSub: { fontSize: 12, color: colors.sage, marginTop: 2 },
   flexibleNote: { fontSize: 12, color: colors.sage, fontStyle: 'italic', marginTop: 6, marginBottom: 2 },
+  windowToText: { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
   overnightCalc: {
     backgroundColor: colors.primaryLight, borderRadius: 12, padding: 12,
     marginTop: 12, alignItems: 'center',

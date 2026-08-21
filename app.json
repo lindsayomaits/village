@@ -40,6 +40,12 @@
           "icon": "./assets/icon.png",
           "color": "#E07B65"
         }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "VillageMates uses your calendar to add sits you've scheduled."
+        }
       ]
     ],
     "extra": {
