@@ -197,8 +197,8 @@ export default function NewRequestScreen() {
   const NEW_REQUEST_FLOOR = -10;
 
   const catConfig = category ? CATEGORIES.find(c => c.key === category) : null;
-  const themeColor = colors.primary;
-  const themeLightColor = colors.primaryLight;
+  const themeColor = colors.sage;
+  const themeLightColor = colors.sageLight;
 
   // When a specific person is already targeted (arrived via "Request Help
   // Directly" from their profile), default the category picker down to
