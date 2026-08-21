@@ -72,7 +72,14 @@ export default function RequestsScreen() {
     if (catFilter !== 'all') query = query.eq('category', catFilter);
 
     if (filter === 'open') {
-      query = query.eq('status', 'open').in('requesting_family_id', ids ?? []);
+      // A request sent directly to one household (target_household_id set)
+      // shouldn't show up in every other connection's Open feed too —
+      // only the requester's own general (untargeted) posts, plus
+      // anything targeted specifically at me.
+      query = query
+        .eq('status', 'open')
+        .in('requesting_family_id', ids ?? [])
+        .or(`target_household_id.is.null,target_household_id.eq.${family?.id ?? ''}`);
     } else if (filter === 'mine') {
       query = query
         .eq('requesting_family_id', family?.id ?? '')

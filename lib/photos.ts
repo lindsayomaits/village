@@ -23,30 +23,35 @@ export async function pickAndUploadAvatar(familyId: string): Promise<string | nu
   const path = `${familyId}/photo.${ext}`;
   const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
 
-  // fetch(uri).blob() silently produces an empty/broken upload for local
-  // file:// URIs on native — expo-file-system's arrayBuffer() reads the
-  // actual bytes off disk instead.
-  const arrayBuffer = await new File(uri).arrayBuffer();
-  const { error: uploadError } = await supabase.storage
-    .from('avatars')
-    .upload(path, arrayBuffer, { contentType, upsert: true });
-  if (uploadError) {
-    Alert.alert('Upload failed', uploadError.message);
+  try {
+    // fetch(uri).blob() silently produces an empty/broken upload for local
+    // file:// URIs on native — expo-file-system's arrayBuffer() reads the
+    // actual bytes off disk instead.
+    const arrayBuffer = await new File(uri).arrayBuffer();
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(path, arrayBuffer, { contentType, upsert: true });
+    if (uploadError) {
+      Alert.alert('Upload failed', uploadError.message);
+      return null;
+    }
+
+    const { data } = supabase.storage.from('avatars').getPublicUrl(path);
+    // Cache-bust so the new photo shows immediately instead of a stale CDN
+    // copy at the same path.
+    const photoUrl = `${data.publicUrl}?t=${Date.now()}`;
+
+    const { error: updateError } = await supabase.from('families').update({ photo_url: photoUrl }).eq('id', familyId);
+    if (updateError) {
+      Alert.alert('Error', updateError.message);
+      return null;
+    }
+
+    return photoUrl;
+  } catch (err) {
+    Alert.alert('Upload failed', err instanceof Error ? err.message : 'Something went wrong reading that photo.');
     return null;
   }
-
-  const { data } = supabase.storage.from('avatars').getPublicUrl(path);
-  // Cache-bust so the new photo shows immediately instead of a stale CDN
-  // copy at the same path.
-  const photoUrl = `${data.publicUrl}?t=${Date.now()}`;
-
-  const { error: updateError } = await supabase.from('families').update({ photo_url: photoUrl }).eq('id', familyId);
-  if (updateError) {
-    Alert.alert('Error', updateError.message);
-    return null;
-  }
-
-  return photoUrl;
 }
 
 export async function removeAvatar(familyId: string): Promise<boolean> {

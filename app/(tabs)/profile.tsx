@@ -47,17 +47,23 @@ export default function ProfileScreen() {
   async function handleChangePhoto() {
     if (!family) return;
     setUploadingPhoto(true);
-    const url = await pickAndUploadAvatar(family.id);
-    setUploadingPhoto(false);
-    if (url) await refreshFamily();
+    try {
+      const url = await pickAndUploadAvatar(family.id);
+      if (url) await refreshFamily();
+    } finally {
+      setUploadingPhoto(false);
+    }
   }
 
   async function handleRemovePhoto() {
     if (!family) return;
     setUploadingPhoto(true);
-    const ok = await removeAvatar(family.id);
-    setUploadingPhoto(false);
-    if (ok) await refreshFamily();
+    try {
+      const ok = await removeAvatar(family.id);
+      if (ok) await refreshFamily();
+    } finally {
+      setUploadingPhoto(false);
+    }
   }
 
   async function loadBlocked() {
