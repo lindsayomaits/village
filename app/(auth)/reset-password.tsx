@@ -4,6 +4,7 @@ import {
   KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { Text } from '../../components/Text';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
@@ -31,6 +32,7 @@ export default function ResetPasswordScreen() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [saving, setSaving] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     async function exchange() {
@@ -125,23 +127,33 @@ export default function ResetPasswordScreen() {
         <Text style={styles.title}>Set a new password</Text>
         <Text style={styles.subtitle}>Choose a new password for your account.</Text>
 
-        <TextInput
-          style={styles.input}
-          placeholder="New password"
-          placeholderTextColor={colors.textMuted}
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-          autoFocus
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Confirm new password"
-          placeholderTextColor={colors.textMuted}
-          value={confirmPassword}
-          onChangeText={setConfirmPassword}
-          secureTextEntry
-        />
+        <View style={styles.inputWrapper}>
+          <TextInput
+            style={styles.inputField}
+            placeholder="New password"
+            placeholderTextColor={colors.textMuted}
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry={!showPassword}
+            autoFocus
+          />
+          <TouchableOpacity style={styles.eyeButton} onPress={() => setShowPassword(v => !v)}>
+            <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.inputWrapper}>
+          <TextInput
+            style={styles.inputField}
+            placeholder="Confirm new password"
+            placeholderTextColor={colors.textMuted}
+            value={confirmPassword}
+            onChangeText={setConfirmPassword}
+            secureTextEntry={!showPassword}
+          />
+          <TouchableOpacity style={styles.eyeButton} onPress={() => setShowPassword(v => !v)}>
+            <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
 
         <TouchableOpacity style={styles.button} onPress={handleSetPassword} disabled={saving}>
           {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Set Password</Text>}
@@ -162,6 +174,19 @@ const styles = StyleSheet.create({
     borderRadius: 14, paddingHorizontal: 18, paddingVertical: 15,
     fontSize: 16, color: colors.text, marginBottom: 14,
     fontFamily: 'Inter_400Regular',
+  },
+  inputWrapper: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border,
+    borderRadius: 14, marginBottom: 14,
+  },
+  inputField: {
+    flex: 1, paddingHorizontal: 18, paddingVertical: 15,
+    fontSize: 16, color: colors.text,
+    fontFamily: 'Inter_400Regular',
+  },
+  eyeButton: {
+    paddingHorizontal: 14, paddingVertical: 15,
   },
   button: {
     backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 17,
