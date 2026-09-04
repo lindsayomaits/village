@@ -136,7 +136,7 @@ export type Request = {
   end_time: string | null;
   category: RequestCategory;
   category_details: CategoryDetails;
-  post_type: 'request' | 'offering';
+  post_type: 'request';
   target_household_id: string | null;
   target_household?: Family;
   settled_at: string | null;
