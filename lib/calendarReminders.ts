@@ -1,8 +1,14 @@
 import * as Calendar from 'expo-calendar';
-import * as Notifications from 'expo-notifications';
+import type * as NotificationsType from 'expo-notifications';
 import { Platform, Alert } from 'react-native';
 import { combineDateAndTime } from './utils';
 import type { Request } from '../types';
+
+// Merely importing 'expo-notifications' throws in Expo Go (SDK 53+ dropped
+// remote push there), so it's required lazily rather than at module load.
+function getNotifications() {
+  return require('expo-notifications') as typeof NotificationsType;
+}
 
 function eventWindow(req: Request): { start: Date; end: Date } {
   const start = combineDateAndTime(req.date, req.start_time);
@@ -97,6 +103,8 @@ export async function scheduleReminders(req: Request, whens: ReminderOffset[]): 
     return;
   }
   if (whens.length === 0) return;
+
+  const Notifications = getNotifications();
 
   const { status: existing } = await Notifications.getPermissionsAsync();
   let status = existing;

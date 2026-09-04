@@ -3,18 +3,26 @@ import { Platform } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold, Inter_800ExtraBold } from '@expo-google-fonts/inter';
 import * as SplashScreen from 'expo-splash-screen';
-import * as Notifications from 'expo-notifications';
+import type * as NotificationsType from 'expo-notifications';
+import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
 
 SplashScreen.preventAutoHideAsync();
+
+// Remote push (and the notification-tap APIs below) were removed from
+// Expo Go in SDK 53 and merely importing 'expo-notifications' throws there
+// — skip wiring them up, and require the module lazily, in Expo Go.
+const inExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === 'storeClient';
 
 function useNotificationDeepLinks() {
   const router = useRouter();
 
   useEffect(() => {
-    if (Platform.OS === 'web') return;
+    if (Platform.OS === 'web' || inExpoGo) return;
 
-    function routeFromResponse(response: Notifications.NotificationResponse | null) {
+    const Notifications = require('expo-notifications') as typeof NotificationsType;
+
+    function routeFromResponse(response: NotificationsType.NotificationResponse | null) {
       const path = response?.notification.request.content.data?.path;
       if (typeof path === 'string') router.push(path as never);
     }

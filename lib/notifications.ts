@@ -1,17 +1,27 @@
-import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { supabase } from './supabase';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+const inExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === 'storeClient';
+
+// Merely importing 'expo-notifications' throws in Expo Go (SDK 53+ dropped
+// remote push there), so it must be required lazily and only outside Expo Go
+// — a static top-level import would crash every screen that pulls this file in.
+function getNotifications() {
+  return require('expo-notifications') as typeof import('expo-notifications');
+}
+
+if (!inExpoGo) {
+  getNotifications().setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
+  });
+}
 
 function validTokens(...tokens: (string | null | undefined)[]): string[] {
   return tokens.filter((t): t is string => !!t && t.startsWith('ExponentPushToken'));
@@ -80,26 +90,32 @@ async function sendPush(messages: { to: string; title: string; body: string; sou
 
 export async function registerForPushNotifications(familyId: string) {
   if (Platform.OS === 'web') return;
+  // Remote push was removed from Expo Go in SDK 53 — skip registration
+  // there so login doesn't crash; only development/production builds
+  // actually deliver push anyway.
+  if (inExpoGo) return;
 
-  const { status: existing } = await Notifications.getPermissionsAsync();
-  let status = existing;
-
-  if (existing !== 'granted') {
-    const { status: requested } = await Notifications.requestPermissionsAsync();
-    status = requested;
-  }
-
-  if (status !== 'granted') return;
-
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('default', {
-      name: 'VillageMates',
-      importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
-    });
-  }
+  const Notifications = getNotifications();
 
   try {
+    const { status: existing } = await Notifications.getPermissionsAsync();
+    let status = existing;
+
+    if (existing !== 'granted') {
+      const { status: requested } = await Notifications.requestPermissionsAsync();
+      status = requested;
+    }
+
+    if (status !== 'granted') return;
+
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'VillageMates',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+      });
+    }
+
     const projectId = Constants.expoConfig?.extra?.eas?.projectId;
     const token = (await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined)).data;
     await supabase.from('families').update({ push_token: token }).eq('id', familyId);
