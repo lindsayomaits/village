@@ -4,6 +4,7 @@ import {
   RefreshControl, ActivityIndicator, TouchableOpacity,
 } from 'react-native';
 import { Text } from '../components/Text';
+import { MaterialIcons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../lib/auth';
@@ -49,20 +50,23 @@ export default function HistoryScreen() {
     const isAdmin = item.from_family_id === null;
     const isGift = !isAdmin && item.request_id === null;
 
-    let icon = isEarned ? '📥' : '📤';
+    // Direction (arrow + color) always tracks the hour flow itself, even
+    // for gifts and admin adjustments — an emoji rides alongside it only to
+    // call out the special cases, it never replaces the arrow.
+    let emoji: string | null = null;
     let bgColor = isEarned ? colors.greenLight : colors.redLight;
     let title = '';
 
     if (isAdmin) {
-      icon = '⚙️';
+      emoji = '⚙️';
       bgColor = colors.borderLight;
       title = item.note ?? 'Admin adjustment';
     } else if (isGift && isEarned) {
-      icon = '🎁';
+      emoji = '🎁';
       bgColor = colors.sageLight;
       title = `Gift from ${otherName}`;
     } else if (isGift && !isEarned) {
-      icon = '🎁';
+      emoji = '🎁';
       bgColor = colors.primaryLight;
       title = `Gifted to ${otherName}`;
     } else if (isEarned) {
@@ -74,16 +78,23 @@ export default function HistoryScreen() {
     return (
       <View style={[styles.row, isGift && styles.rowGift]}>
         <View style={[styles.iconCircle, { backgroundColor: bgColor }]}>
-          <Text style={styles.rowIcon}>{icon}</Text>
+          {emoji ? (
+            <Text style={styles.rowIcon}>{emoji}</Text>
+          ) : (
+            <MaterialIcons name={isEarned ? 'call-received' : 'call-made'} size={20} color={isEarned ? colors.sageDark : colors.primaryDark} />
+          )}
         </View>
         <View style={styles.rowInfo}>
           <Text style={styles.rowTitle}>{title}</Text>
           <Text style={styles.rowDate}>{formatDateTime(item.created_at)}</Text>
           {item.note && !isAdmin ? <Text style={styles.rowNote}>"{item.note}"</Text> : null}
         </View>
-        <Text style={[styles.rowAmount, { color: isEarned ? colors.green : colors.red }]}>
-          {isEarned ? '+' : '-'}{item.hours}h
-        </Text>
+        <View style={styles.rowAmountGroup}>
+          <MaterialIcons name={isEarned ? 'call-received' : 'call-made'} size={13} color={isEarned ? colors.sageDark : colors.primaryDark} />
+          <Text style={[styles.rowAmount, { color: isEarned ? colors.sageDark : colors.primaryDark }]}>
+            {isEarned ? '+' : '-'}{item.hours}h
+          </Text>
+        </View>
       </View>
     );
   };
@@ -137,7 +148,8 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 15, fontWeight: '600', color: colors.text, marginBottom: 2 },
   rowDate: { fontSize: 12, color: colors.textMuted },
   rowNote: { fontSize: 12, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
-  rowAmount: { fontSize: 18, fontWeight: '800', marginLeft: 8 },
+  rowAmountGroup: { flexDirection: 'row', alignItems: 'center', gap: 3, marginLeft: 8 },
+  rowAmount: { fontSize: 18, fontWeight: '800' },
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyIcon: { fontSize: 48, marginBottom: 12 },
   emptyText: { fontSize: 16, color: colors.textMuted, fontWeight: '500' },

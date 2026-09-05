@@ -7,9 +7,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
-import { colors } from '../../lib/theme';
+import { colors, buttonStyles } from '../../lib/theme';
 import { notifyFamily } from '../../lib/notifications';
 import { addRequestToCalendar, scheduleReminders } from '../../lib/calendarReminders';
+import { StatusBadge } from '../../components/StatusBadge';
+import { DirectionTag } from '../../components/DirectionTag';
+import { ModifierBadge } from '../../components/ModifierBadge';
 import type { Request, RequestCategory } from '../../types';
 
 const CATEGORY_LABELS: Record<RequestCategory, { emoji: string; label: string }> = {
@@ -25,17 +28,6 @@ const CATEGORY_LABELS: Record<RequestCategory, { emoji: string; label: string }>
 
 function formatDate(dateStr: string) {
   return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-}
-
-function statusInfo(status: Request['status']): { label: string; color: string; bg: string } {
-  const map: Record<string, { label: string; color: string; bg: string }> = {
-    open:      { label: 'Available', color: colors.sageDark, bg: colors.greenLight },
-    offered:   { label: 'Pending approval', color: colors.amber, bg: colors.amberLight },
-    accepted:  { label: 'Accepted', color: colors.blue, bg: colors.blueLight },
-    completed: { label: 'Completed', color: colors.purple, bg: colors.purpleLight },
-    cancelled: { label: 'Cancelled', color: colors.red, bg: colors.redLight },
-  };
-  return map[status] ?? map.open;
 }
 
 function categoryDetailText(category: RequestCategory, details: Request['category_details']): string | null {
@@ -103,9 +95,10 @@ export default function RequestDetailScreen() {
 
   const isOwn = req.requesting_family_id === family?.id;
   const isFulfiller = req.fulfilling_family_id === family?.id;
-  const isPastDue = req.status !== 'completed' && req.date < new Date().toISOString().split('T')[0];
+  // Multi-day (overnight) requests aren't past due until the actual end
+  // date passes, not the start/drop-off date.
+  const isPastDue = req.status !== 'completed' && (req.end_date ?? req.date) < new Date().toISOString().split('T')[0];
   const cat = CATEGORY_LABELS[req.category];
-  const s = statusInfo(req.status);
   const detailText = categoryDetailText(req.category, req.category_details);
   const isFlexible = !!(req.category_details as { timing_flexible?: boolean } | null)?.timing_flexible;
 
@@ -249,8 +242,15 @@ export default function RequestDetailScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll}>
-        {req.is_urgent && req.status !== 'cancelled' && (
-          <View style={styles.urgentBanner}><Text style={styles.urgentBannerText}>❗️ URGENT</Text></View>
+        <DirectionTag earning={isFulfiller || !isOwn} hours={req.duration_hours} />
+
+        {(req.is_urgent || req.is_overnight || req.category === 'manual_labor' || isFlexible) && req.status !== 'cancelled' && (
+          <View style={styles.modifierRow}>
+            {req.is_urgent && <ModifierBadge kind="urgent" />}
+            {req.is_overnight && <ModifierBadge kind="overnight" />}
+            {req.category === 'manual_labor' && <ModifierBadge kind="rate2x" />}
+            {isFlexible && <ModifierBadge kind="flexible" />}
+          </View>
         )}
 
         <View style={styles.headerRow}>
@@ -262,11 +262,11 @@ export default function RequestDetailScreen() {
         </View>
 
         <View style={styles.badgeRow}>
-          <View style={[styles.badge, { backgroundColor: isPastDue ? colors.redLight : s.bg }]}>
-            <Text style={[styles.badgeText, { color: isPastDue ? colors.red : s.color }]}>{isPastDue ? '⏰ Past date' : s.label}</Text>
-          </View>
-          {req.is_overnight && <View style={[styles.badge, { backgroundColor: colors.purpleLight }]}><Text style={[styles.badgeText, { color: colors.purple }]}>🌙 Overnight</Text></View>}
-          {isFlexible && <View style={[styles.badge, { backgroundColor: colors.sageLight }]}><Text style={[styles.badgeText, { color: colors.sageDark }]}>⏰ Flexible timing</Text></View>}
+          {isPastDue ? (
+            <View style={[styles.badge, { backgroundColor: colors.redLight }]}><Text style={[styles.badgeText, { color: colors.red }]}>⏰ Past date</Text></View>
+          ) : (
+            <StatusBadge status={req.status} />
+          )}
         </View>
 
         {/* Who */}
@@ -378,48 +378,48 @@ export default function RequestDetailScreen() {
         {/* Actions */}
         <View style={styles.actions}>
           {req.status === 'open' && !isOwn && (
-            <TouchableOpacity style={styles.primaryBtn} onPress={offerRequest} disabled={busy}>
-              <Text style={styles.primaryBtnText}>Offer to help — Earn {req.duration_hours}h</Text>
+            <TouchableOpacity style={buttonStyles.earn.container} onPress={offerRequest} disabled={busy}>
+              <Text style={buttonStyles.earn.text}>Offer to help — Earn {req.duration_hours}h</Text>
             </TouchableOpacity>
           )}
           {req.status === 'open' && isOwn && (
             <>
-              <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: req.id } })}>
-                <Text style={styles.secondaryBtnText}>Edit</Text>
+              <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: req.id } })}>
+                <Text style={buttonStyles.secondary.text}>Edit</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.dangerBtn} onPress={cancelRequest} disabled={busy}>
-                <Text style={styles.dangerBtnText}>Cancel Request</Text>
+              <TouchableOpacity style={buttonStyles.destructive.container} onPress={cancelRequest} disabled={busy}>
+                <Text style={buttonStyles.destructive.text}>Cancel Request</Text>
               </TouchableOpacity>
             </>
           )}
           {req.status === 'offered' && isOwn && (
             <>
-              <TouchableOpacity style={styles.approveBtn} onPress={approveOffer} disabled={busy}>
-                <Text style={styles.approveBtnText}>Approve ✓</Text>
+              <TouchableOpacity style={buttonStyles.spend.container} onPress={approveOffer} disabled={busy}>
+                <Text style={buttonStyles.spend.text}>Approve ✓</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.dangerOutlineBtn} onPress={declineOffer} disabled={busy}>
-                <Text style={styles.dangerOutlineBtnText}>Decline offer</Text>
+              <TouchableOpacity style={buttonStyles.destructive.container} onPress={declineOffer} disabled={busy}>
+                <Text style={buttonStyles.destructive.text}>Decline offer</Text>
               </TouchableOpacity>
             </>
           )}
           {req.status === 'offered' && isFulfiller && (
-            <TouchableOpacity style={styles.secondaryBtn} onPress={withdrawOffer} disabled={busy}>
-              <Text style={styles.secondaryBtnText}>Withdraw my offer</Text>
+            <TouchableOpacity style={buttonStyles.secondary.container} onPress={withdrawOffer} disabled={busy}>
+              <Text style={buttonStyles.secondary.text}>Withdraw my offer</Text>
             </TouchableOpacity>
           )}
           {req.status === 'accepted' && !req.settled_at && (isOwn || isFulfiller) && (
             <>
-              <TouchableOpacity style={styles.approveBtn} onPress={markCompleted} disabled={busy}>
-                <Text style={styles.approveBtnText}>Mark as Completed ✓</Text>
+              <TouchableOpacity style={buttonStyles.earn.container} onPress={markCompleted} disabled={busy}>
+                <Text style={buttonStyles.earn.text}>Mark as Completed ✓</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.dangerOutlineBtn} onPress={cancelAcceptedRequest} disabled={busy}>
-                <Text style={styles.dangerOutlineBtnText}>{isOwn ? 'Cancel' : 'Back Out'}</Text>
+              <TouchableOpacity style={buttonStyles.destructive.container} onPress={cancelAcceptedRequest} disabled={busy}>
+                <Text style={buttonStyles.destructive.text}>{isOwn ? 'Cancel' : 'Back Out'}</Text>
               </TouchableOpacity>
             </>
           )}
           {(req.status === 'accepted' || req.status === 'completed') && req.settled_at && !req.reversed_at && isOwn && (
-            <TouchableOpacity style={styles.dangerOutlineBtn} onPress={reverseSettlement} disabled={busy}>
-              <Text style={styles.dangerOutlineBtnText}>Didn't happen? Reverse</Text>
+            <TouchableOpacity style={buttonStyles.destructive.container} onPress={reverseSettlement} disabled={busy}>
+              <Text style={buttonStyles.destructive.text}>Didn't happen? Reverse</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -436,8 +436,7 @@ const styles = StyleSheet.create({
   scroll: { paddingHorizontal: 20, paddingBottom: 48 },
   notFound: { fontSize: 15, color: colors.textMuted, textAlign: 'center', marginTop: 60, paddingHorizontal: 30 },
 
-  urgentBanner: { backgroundColor: colors.red, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, alignSelf: 'flex-start', marginBottom: 10 },
-  urgentBannerText: { color: '#fff', fontSize: 12, fontWeight: '800', letterSpacing: 0.5 },
+  modifierRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
 
   headerRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, marginBottom: 12 },
   catEmoji: { fontSize: 32 },
@@ -471,14 +470,4 @@ const styles = StyleSheet.create({
   calendarBtnText: { color: colors.text, fontWeight: '700', fontSize: 14 },
 
   actions: { gap: 10 },
-  primaryBtn: { backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 15, alignItems: 'center' },
-  primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
-  secondaryBtn: { borderWidth: 1.5, borderColor: colors.border, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
-  secondaryBtnText: { color: colors.text, fontWeight: '700', fontSize: 15 },
-  dangerBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
-  dangerBtnText: { color: colors.red, fontWeight: '700', fontSize: 15 },
-  dangerOutlineBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 14, paddingVertical: 12, alignItems: 'center' },
-  dangerOutlineBtnText: { color: colors.red, fontWeight: '600', fontSize: 14 },
-  approveBtn: { backgroundColor: colors.green, borderRadius: 14, paddingVertical: 15, alignItems: 'center' },
-  approveBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
 });

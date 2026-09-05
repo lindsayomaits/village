@@ -220,14 +220,16 @@ export default function EditRequestScreen() {
       setIsOvernight(req.is_overnight ?? false);
       setIsUrgent(req.is_urgent ?? false);
       if ((req.category ?? 'kid_sit') === 'kid_sit' && req.category_details) {
-        const d = req.category_details as { location?: 'kids_house' | 'sitters_house' };
+        const d = req.category_details as { location?: 'kids_house' | 'sitters_house'; timing_flexible?: boolean };
         setKidLocation(d.location ?? null);
+        setTimingFlexible(d.timing_flexible ?? false);
       }
 
       if (req.category === 'dog' && req.category_details) {
-        const d = req.category_details as { pet_name?: string; dog_name?: string; dog_task: 'walk' | 'boarding' | 'house_check' };
+        const d = req.category_details as { pet_name?: string; dog_name?: string; dog_task: 'walk' | 'boarding' | 'house_check'; timing_flexible?: boolean };
         setPetName(d.pet_name ?? d.dog_name ?? '');
         setDogTask(d.dog_task ?? 'boarding');
+        setTimingFlexible(d.timing_flexible ?? false);
       }
       if (req.category === 'manual_labor' && req.category_details) {
         const d = req.category_details as { labor_description: string; actual_hours: number; timing_flexible?: boolean };
@@ -356,8 +358,8 @@ export default function EditRequestScreen() {
       : ERRAND_TYPES.find(s => s.key === errandType)?.label ?? errandType;
 
     const categoryDetails =
-      category === 'kid_sit'      ? { location: kidLocation! }
-      : category === 'dog'        ? { pet_name: petName.trim(), dog_task: dogTask }
+      category === 'kid_sit'      ? { location: kidLocation!, timing_flexible: (timingFlexible && !isOvernight) || undefined }
+      : category === 'dog'        ? { pet_name: petName.trim(), dog_task: dogTask, timing_flexible: (timingFlexible && !isOvernight) || undefined }
       : category === 'manual_labor' ? { labor_description: laborDescription.trim(), actual_hours: duration, timing_flexible: timingFlexible || undefined }
       : category === 'professional' ? { service_type: resolvedService, timing_flexible: timingFlexible || undefined }
       : category === 'cooking'      ? { cooking_type: resolvedCooking, timing_flexible: timingFlexible || undefined }
@@ -657,8 +659,11 @@ export default function EditRequestScreen() {
             </>
           )}
 
-          {/* Timing flexible toggle (manual_labor, professional, cooking) */}
-          {(category === 'manual_labor' || category === 'professional' || category === 'cooking' || category === 'elder_care' || category === 'physical_training' || category === 'errands') && (
+          {/* Timing flexible toggle — for kid-sitting/pet care this only
+              applies outside overnight mode, which already has its own
+              fixed drop-off/pick-up window. */}
+          {(category === 'manual_labor' || category === 'professional' || category === 'cooking' || category === 'elder_care' || category === 'physical_training' || category === 'errands'
+            || ((category === 'kid_sit' || category === 'dog') && !isOvernight)) && (
             <View style={styles.flexibleRow}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.flexibleLabel}>⏰ Timing flexible</Text>
@@ -754,7 +759,15 @@ export default function EditRequestScreen() {
                   </View>
                   {showDatePicker && (
                     <DateTimePicker value={date} mode="date" minimumDate={new Date()}
-                      onChange={(_, s) => { setShowDatePicker(false); if (s) setDate(s); }} />
+                      onChange={(_, s) => {
+                        setShowDatePicker(false);
+                        if (!s) return;
+                        setDate(s);
+                        // Keep the window valid — pushing "From" past the
+                        // current "To" would otherwise leave an invalid
+                        // end-before-start window sitting there silently.
+                        if (s > flexEndDate) setFlexEndDate(s);
+                      }} />
                   )}
                   {showFlexEndDatePicker && (
                     <DateTimePicker value={flexEndDate} mode="date" minimumDate={date}

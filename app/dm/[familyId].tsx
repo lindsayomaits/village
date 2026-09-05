@@ -15,6 +15,7 @@ import { getFamilyAnimal } from '../../lib/animals';
 import { notifyFamily } from '../../lib/notifications';
 import { lastNamesLabel } from '../../lib/utils';
 import { getActiveTrigger, extractTaggedRequests, type MentionEntry } from '../../lib/richText';
+import { PersonProfileModal } from '../../components/PersonProfileModal';
 import type { DirectMessage, Family, Request } from '../../types';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '👎'];
@@ -30,6 +31,7 @@ export default function DMScreen() {
   const [body, setBody] = useState(() => prefill ?? '');
   const [sending, setSending] = useState(false);
   const [otherFamily, setOtherFamily] = useState<Family | null>(null);
+  const [showProfile, setShowProfile] = useState(false);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [reactionTarget, setReactionTarget] = useState<DirectMessage | null>(null);
@@ -278,15 +280,17 @@ export default function DMScreen() {
   const targetIsOwn = reactionTarget?.from_family_id === family?.id;
 
   return (
+    <>
+    <PersonProfileModal family={showProfile ? otherFamily : null} onClose={() => setShowProfile(false)} />
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Text style={styles.back}>← Back</Text>
         </TouchableOpacity>
-        <View style={styles.headerCenter}>
+        <TouchableOpacity style={styles.headerCenter} onPress={() => setShowProfile(true)} disabled={!otherFamily}>
           <Avatar familyId={otherId} animal={otherFamily?.animal} photoUrl={otherFamily?.photo_url} size={28} />
           <Text style={styles.headerName} numberOfLines={1}>{otherName}</Text>
-        </View>
+        </TouchableOpacity>
         <TouchableOpacity style={styles.notifBtn} onPress={toggleMuteThread}>
           <Text style={styles.notifIcon}>{isMuted ? '🔕' : '🔔'}</Text>
           <Text style={styles.notifText}>{isMuted ? 'Muted' : 'Notify'}</Text>
@@ -412,6 +416,7 @@ export default function DMScreen() {
         </View>
       </Modal>
     </SafeAreaView>
+    </>
   );
 }
 

@@ -74,13 +74,6 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="chat"
-        options={{
-          tabBarLabel: 'Messages',
-          tabBarIcon: ({ focused }) => tabIcon(focused, 'chatbubbles-outline', 'chatbubbles'),
-        }}
-      />
-      <Tabs.Screen
         name="members"
         options={{
           tabBarLabel: 'Village',

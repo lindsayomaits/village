@@ -37,14 +37,17 @@ export async function getPendingDelta(familyId: string): Promise<number> {
 // Same underlying rows as getPendingDelta, split into the two directions
 // instead of netted together — "on the way" (you offered to help, hours
 // land once the other person accepts) vs "possible spend" (your own open
-// requests, hours leave once someone fulfills them).
-export async function getPendingBreakdown(familyId: string): Promise<{ incoming: number; outgoing: number }> {
+// requests, hours leave once someone fulfills them). Counts ride along so
+// the balance card can show "2 commitments" next to the hour totals.
+export async function getPendingBreakdown(familyId: string): Promise<{ incoming: number; outgoing: number; incomingCount: number; outgoingCount: number }> {
   const rows = await fetchPendingRows(familyId);
   let incoming = 0;
   let outgoing = 0;
+  let incomingCount = 0;
+  let outgoingCount = 0;
   for (const r of rows) {
-    if (r.requesting_family_id === familyId) outgoing += r.duration_hours;
-    else if (r.fulfilling_family_id === familyId) incoming += r.duration_hours;
+    if (r.requesting_family_id === familyId) { outgoing += r.duration_hours; outgoingCount++; }
+    else if (r.fulfilling_family_id === familyId) { incoming += r.duration_hours; incomingCount++; }
   }
-  return { incoming, outgoing };
+  return { incoming, outgoing, incomingCount, outgoingCount };
 }

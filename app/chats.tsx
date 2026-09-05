@@ -1,16 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { View, StyleSheet, FlatList, TouchableOpacity, TextInput, Modal, Alert, ActivityIndicator } from 'react-native';
-import { Text } from '../../components/Text';
-import { Avatar } from '../../components/Avatar';
+import { Text } from '../components/Text';
+import { Avatar } from '../components/Avatar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { useAuth } from '../../lib/auth';
-import { supabase } from '../../lib/supabase';
-import { colors } from '../../lib/theme';
-import { getFamilyAnimal } from '../../lib/animals';
-import type { Family, GroupChat } from '../../types';
+import { useAuth } from '../lib/auth';
+import { supabase } from '../lib/supabase';
+import { colors } from '../lib/theme';
+import { getFamilyAnimal } from '../lib/animals';
+import type { Family, GroupChat } from '../types';
 
-export default function ChatScreen() {
+export default function ChatsScreen() {
   const { family } = useAuth();
   const router = useRouter();
 
@@ -195,13 +195,14 @@ export default function ChatScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.titleRow}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()}><Text style={styles.back}>← Back</Text></TouchableOpacity>
         <Text style={styles.title}>Messages</Text>
-        {directFamilies.length > 0 && (
+        {directFamilies.length > 0 ? (
           <TouchableOpacity style={styles.newGroupBtn} onPress={() => setShowCreateGroup(true)}>
-            <Text style={styles.newGroupBtnText}>+ Group Message</Text>
+            <Text style={styles.newGroupBtnText}>+ Group</Text>
           </TouchableOpacity>
-        )}
+        ) : <View style={{ width: 60 }} />}
       </View>
 
       {!family && (
@@ -320,8 +321,9 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 16, marginBottom: 12 },
-  title: { fontSize: 24, fontWeight: '800', color: colors.text },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 16, marginBottom: 12 },
+  back: { fontSize: 17, color: colors.primary, fontWeight: '600', width: 60 },
+  title: { fontSize: 20, fontWeight: '800', color: colors.text },
   dmList: { paddingHorizontal: 20, paddingTop: 4 },
   dmRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 8, borderWidth: 1.5, borderColor: colors.borderLight },
   dmAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.sageLight, alignItems: 'center', justifyContent: 'center', marginRight: 12 },

@@ -13,6 +13,7 @@ import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import { formatPhone, renderKidsInfo, displayKidsData, displayPetsData } from '../../lib/utils';
 import { notifyFamily, notifyAdmins } from '../../lib/notifications';
+import { PersonProfileModal } from '../../components/PersonProfileModal';
 import type { Family, Connection } from '../../types';
 
 const GIFT_HOUR_OPTIONS = [0.5, 1, 2, 3, 4, 5, 8, 10];
@@ -27,6 +28,7 @@ const CATEGORY_LABELS: Record<string, { emoji: string; label: string }> = {
   cooking:           { emoji: '🍳', label: 'Cooking' },
   elder_care:        { emoji: '🤝', label: 'Elder care' },
   physical_training: { emoji: '🏃', label: 'Fitness' },
+  errands:           { emoji: '🛒', label: 'Errands' },
 };
 
 export default function MembersScreen() {
@@ -47,16 +49,6 @@ export default function MembersScreen() {
   const [connectCode, setConnectCode] = useState('');
   const [connectingByCode, setConnectingByCode] = useState(false);
   const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
-  const [reportTarget, setReportTarget] = useState<Family | null>(null);
-  const [reportReason, setReportReason] = useState<string | null>(null);
-  const [reportNote, setReportNote] = useState('');
-  const [reportSubmitting, setReportSubmitting] = useState(false);
-
-  // Gift hours state
-  const [giftTarget, setGiftTarget] = useState<Family | null>(null);
-  const [giftHours, setGiftHours] = useState(1);
-  const [giftNote, setGiftNote] = useState('');
-  const [giftLoading, setGiftLoading] = useState(false);
 
   async function loadData() {
     // loadData fires from many places (focus, refresh, and after every
@@ -86,50 +78,6 @@ export default function MembersScreen() {
     setConnections((connectionsRes.data ?? []) as Connection[]);
     setBlockedIds(new Set((blocksRes.data ?? []).map((b: { blocked_id: string }) => b.blocked_id)));
     setLoading(false);
-  }
-
-  async function blockHousehold(target: Family) {
-    Alert.alert(
-      `Block ${target.name}?`,
-      'They’ll be disconnected and won’t be able to message you, connect with you, or find you again. This can be undone later in Profile.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Block', style: 'destructive',
-          onPress: async () => {
-            setActionLoading(true);
-            const { error } = await supabase.rpc('block_household', { p_blocked_id: target.id });
-            setActionLoading(false);
-            if (error) return Alert.alert('Error', error.message);
-            setSelected(null);
-            await loadData();
-          },
-        },
-      ]
-    );
-  }
-
-  function openReportModal(target: Family) {
-    setSelected(null);
-    setReportReason(null);
-    setReportNote('');
-    setReportTarget(target);
-  }
-
-  async function submitReport() {
-    if (!myHousehold || !reportTarget || !reportReason) return;
-    setReportSubmitting(true);
-    const { error } = await supabase.from('reports').insert({
-      reporter_id: myHousehold.id,
-      reported_id: reportTarget.id,
-      reason: reportReason,
-      note: reportNote.trim() || null,
-    });
-    setReportSubmitting(false);
-    if (error) return Alert.alert('Error', error.message);
-    notifyAdmins('🚩 New report', `${myHousehold.name} reported ${reportTarget.name} — ${reportReason}`, { path: '/(tabs)/admin' }).catch(() => {});
-    setReportTarget(null);
-    Alert.alert('Report submitted', 'Thanks for letting us know — an admin will review this.');
   }
 
   useEffect(() => {
@@ -162,27 +110,6 @@ export default function MembersScreen() {
     return connections.find(
       c => c.requester_id === householdId || c.recipient_id === householdId
     );
-  }
-
-  async function sendConnectionRequest(household: Family) {
-    if (!myHousehold) return;
-    setActionLoading(true);
-    const { error } = await supabase.from('connections').insert({
-      requester_id: myHousehold.id,
-      recipient_id: household.id,
-      status: 'pending',
-    });
-    setActionLoading(false);
-    if (error) {
-      await loadData();
-      if (error.code === '23505') {
-        return Alert.alert('Already in progress', `You and ${household.name} already have a connection or pending request.`);
-      }
-      return Alert.alert('Error', error.message);
-    }
-    await loadData();
-    notifyFamily(household.id, '🤝 New connection request', `${myHousehold.name} wants to connect with you`, { path: '/(tabs)/members?tab=pending' }).catch(() => {});
-    Alert.alert('Request sent!', `${household.name} will be notified.`);
   }
 
   async function submitConnectCode() {
@@ -218,63 +145,6 @@ export default function MembersScreen() {
     setSelected(null);
   }
 
-  async function disconnectHousehold(householdId: string) {
-    Alert.alert('Disconnect', 'Are you sure you want to remove this connection?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Disconnect', style: 'destructive',
-        onPress: async () => {
-          const conn = getConnection(householdId);
-          if (!conn) return;
-          setActionLoading(true);
-          await supabase.from('connections').delete().eq('id', conn.id);
-          setActionLoading(false);
-          await loadData();
-          setSelected(null);
-        },
-      },
-    ]);
-  }
-
-  function openGiftModal(household: Family) {
-    setSelected(null);
-    setGiftHours(1);
-    setGiftNote('');
-    setGiftTarget(household);
-  }
-
-  async function submitGift() {
-    if (!giftTarget || !myHousehold) return;
-    const currentBalance = myHousehold.hours_balance ?? 0;
-    const newBalance = currentBalance - giftHours;
-    if (newBalance < 0) {
-      return Alert.alert('Not enough hours', `You only have ${currentBalance}h to gift.`);
-    }
-    Alert.alert(
-      `Gift ${giftHours}h to ${giftTarget.name}?`,
-      `Your balance: ${currentBalance}h → ${newBalance}h`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Send Gift 🎁',
-          onPress: async () => {
-            setGiftLoading(true);
-            const { error } = await supabase.rpc('gift_hours', {
-              p_recipient_id: giftTarget.id,
-              p_hours: giftHours,
-              p_note: giftNote.trim() || null,
-            });
-            setGiftLoading(false);
-            if (error) return Alert.alert('Error', error.message);
-            await notifyFamily(giftTarget.id, '🎁 You received a gift!', `${myHousehold.name} gifted you ${giftHours}h${giftNote.trim() ? ` — "${giftNote.trim()}"` : ''}`, { path: '/(tabs)/profile' });
-            setGiftTarget(null);
-            Alert.alert('Gift sent! 🎁', `${giftHours}h sent to ${giftTarget.name}.`);
-          },
-        },
-      ]
-    );
-  }
-
   const connectedIds = connections
     .filter(c => c.status === 'accepted')
     .map(c => c.requester_id === myHousehold?.id ? c.recipient_id : c.requester_id);
@@ -305,21 +175,32 @@ export default function MembersScreen() {
 
   function renderHouseholdCard({ item }: { item: Family }) {
     const status = getConnectionStatus(item.id);
+    const kidsLine = displayKidsData(item.kids_data ?? []);
+    const subtitle = [item.parent1_name, kidsLine].filter(Boolean).join(' · ');
     return (
       <TouchableOpacity
         style={[styles.card, item.id === myHousehold?.id && styles.cardSelf]}
         onPress={() => setSelected(item)}
       >
-        <View style={styles.cardAvatarWrap}><Avatar familyId={item.id} animal={item.animal} photoUrl={item.photo_url} size={40} /></View>
+        <Avatar familyId={item.id} animal={item.animal} photoUrl={item.photo_url} size={48} style={styles.cardAvatarSquare} />
         <View style={styles.cardInfo}>
           <Text style={styles.cardName}>{item.name}</Text>
-          {item.parent1_name && (
-            <Text style={styles.cardParents}>{item.parent1_name}</Text>
+          {subtitle ? <Text style={styles.cardParents}>{subtitle}</Text> : null}
+          {item.services_offered && item.services_offered.length > 0 && (
+            <View style={styles.cardChipsRow}>
+              {item.services_offered.map(key => {
+                const c = CATEGORY_LABELS[key];
+                if (!c) return null;
+                return (
+                  <View key={key} style={styles.cardChip}>
+                    <Text style={styles.cardChipText}>{c.emoji} {c.label}</Text>
+                  </View>
+                );
+              })}
+            </View>
           )}
         </View>
-        {status === 'connected' && (
-          <View style={styles.connectedBadge}><Text style={styles.connectedBadgeText}>Connected</Text></View>
-        )}
+        {status === 'connected' && <Text style={styles.chevron}>›</Text>}
         {status === 'pending_sent' && (
           <View style={styles.pendingBadge}><Text style={styles.pendingBadgeText}>Pending</Text></View>
         )}
@@ -334,10 +215,12 @@ export default function MembersScreen() {
   function renderPendingCard({ item }: { item: { household: Family; conn: Connection } }) {
     return (
       <View style={styles.pendingCard}>
-        <View style={styles.cardAvatarWrap}><Avatar familyId={item.household.id} animal={item.household.animal} photoUrl={item.household.photo_url} size={40} /></View>
-        <View style={styles.cardInfo}>
-          <Text style={styles.cardName}>{item.household.name}</Text>
-          <Text style={styles.cardParents}>Wants to connect with you</Text>
+        <View style={styles.pendingCardRow}>
+          <View style={styles.cardAvatarWrap}><Avatar familyId={item.household.id} animal={item.household.animal} photoUrl={item.household.photo_url} size={44} /></View>
+          <View style={styles.cardInfo}>
+            <Text style={styles.cardName}>{item.household.name}</Text>
+            <Text style={styles.pendingWantsText}>Wants to connect with you</Text>
+          </View>
         </View>
         <View style={styles.pendingActions}>
           <TouchableOpacity
@@ -363,11 +246,14 @@ export default function MembersScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.headerRow}>
         <View>
-          <Text style={styles.title}>Your Village</Text>
+          <Text style={styles.title}>Your village</Text>
           <Text style={styles.subtitle}>
             {networkHouseholds.length} {networkHouseholds.length === 1 ? 'person' : 'people'} in your network
           </Text>
         </View>
+        <TouchableOpacity style={styles.messagesBtn} onPress={() => router.push('/chats')}>
+          <Text style={styles.messagesBtnText}>💬 Messages</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Tab bar */}
@@ -376,13 +262,13 @@ export default function MembersScreen() {
           style={[styles.tabBtn, tab === 'my_network' && styles.tabBtnActive]}
           onPress={() => setTab('my_network')}
         >
-          <Text style={[styles.tabText, tab === 'my_network' && styles.tabTextActive]}>My Network</Text>
+          <Text style={[styles.tabText, tab === 'my_network' && styles.tabTextActive]}>My network</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.tabBtn, tab === 'find_people' && styles.tabBtnActive]}
           onPress={() => setTab('find_people')}
         >
-          <Text style={[styles.tabText, tab === 'find_people' && styles.tabTextActive]}>Find People</Text>
+          <Text style={[styles.tabText, tab === 'find_people' && styles.tabTextActive]}>Find people</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.tabBtn, tab === 'pending' && styles.tabBtnActive]}
@@ -449,7 +335,7 @@ export default function MembersScreen() {
           )}
 
           {tab === 'my_network' && (
-            networkHouseholds.length === 0 ? (
+            networkHouseholds.length === 0 && pendingHouseholds.length === 0 ? (
               <View style={styles.empty}>
                 <Text style={styles.emptyEmoji}>🤝</Text>
                 <Text style={styles.emptyTitle}>No connections yet</Text>
@@ -462,6 +348,27 @@ export default function MembersScreen() {
                 renderItem={renderHouseholdCard}
                 contentContainerStyle={styles.list}
                 refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
+                ListHeaderComponent={
+                  <>
+                    {pendingHouseholds.length > 0 && (
+                      <View style={styles.pendingSection}>
+                        <Text style={styles.pendingSectionLabel}>
+                          {pendingHouseholds.length} CONNECTION REQUEST{pendingHouseholds.length > 1 ? 'S' : ''}
+                        </Text>
+                        {pendingHouseholds.map(p => <View key={p.conn.id}>{renderPendingCard({ item: p })}</View>)}
+                      </View>
+                    )}
+                    <View style={styles.connectedHeaderRow}>
+                      <Text style={styles.connectedHeaderTitle}>Connected</Text>
+                      <Text style={styles.connectedHeaderCount}>
+                        {networkHouseholds.length} HOUSEHOLD{networkHouseholds.length === 1 ? '' : 'S'}
+                      </Text>
+                    </View>
+                    {networkHouseholds.length > 0 && (
+                      <Text style={styles.messageHint}>Tap anyone below to message them or see their profile.</Text>
+                    )}
+                  </>
+                }
               />
             )
           )}
@@ -508,288 +415,7 @@ export default function MembersScreen() {
         </>
       )}
 
-      {/* Detail modal */}
-      <Modal
-        visible={!!selected}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setSelected(null)}
-      >
-        <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={() => setSelected(null)} />
-        <View style={styles.sheet}>
-          <View style={styles.sheetHandle} />
-          {selected && (() => {
-            const status = getConnectionStatus(selected.id);
-            const conn = getConnection(selected.id);
-            return (
-              <ScrollView bounces={false} contentContainerStyle={styles.sheetContent}>
-                <Avatar familyId={selected.id} animal={selected.animal} photoUrl={selected.photo_url} size={80} style={{ marginTop: 8, marginBottom: 8 }} />
-                <Text style={styles.sheetName}>{selected.name}</Text>
-
-                {(selected.parent1_name || selected.parent1_phone) && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Contact</Text>
-                    <View style={styles.infoRight}>
-                      {selected.parent1_name && <Text style={styles.infoValue}>{selected.parent1_name}</Text>}
-                      {selected.parent1_phone && <Text style={styles.infoSub}>{formatPhone(selected.parent1_phone)}</Text>}
-                    </View>
-                  </View>
-                )}
-
-                {selected.kids_data && selected.kids_data.length > 0 && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Kids</Text>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.infoValue}>{displayKidsData(selected.kids_data)}</Text>
-                      {selected.kids_data.filter(k => k.notes?.trim()).map((k, i) => (
-                        <Text key={i} style={styles.careNoteText}>{k.name}: {renderKidsInfo(k.notes)}</Text>
-                      ))}
-                    </View>
-                  </View>
-                )}
-
-                {selected.pets_data && selected.pets_data.length > 0 && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Pets</Text>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.infoValue}>{displayPetsData(selected.pets_data)}</Text>
-                      {selected.pets_data.filter(p => p.notes?.trim()).map((p, i) => (
-                        <Text key={i} style={styles.careNoteText}>{p.name}: {renderKidsInfo(p.notes)}</Text>
-                      ))}
-                    </View>
-                  </View>
-                )}
-
-                {status !== 'connected' && selected.id !== myHousehold?.id &&
-                  !selected.parent1_name && !selected.kids_data?.length && !selected.pets_data?.length && (
-                  <Text style={styles.connectHint}>Connect with them to see contact info.</Text>
-                )}
-
-                {selected.services_offered && selected.services_offered.length > 0 && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Helps with</Text>
-                    <View style={styles.serviceChips}>
-                      {selected.services_offered
-                        .filter(key => CATEGORY_LABELS[key])
-                        .map(key => (
-                          <View key={key} style={styles.serviceChip}>
-                            <Text style={styles.serviceChipText}>
-                              {CATEGORY_LABELS[key].emoji} {CATEGORY_LABELS[key].label}
-                            </Text>
-                          </View>
-                        ))}
-                    </View>
-                  </View>
-                )}
-
-                {selected.id !== myHousehold?.id && (
-                  <View style={styles.actionButtons}>
-                    {status === 'connected' && (
-                      <>
-                        <TouchableOpacity
-                          style={styles.messageBtn}
-                          onPress={() => { setSelected(null); router.push(`/dm/${selected.id}`); }}
-                        >
-                          <Text style={styles.messageBtnText}>Send a Message</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.messageBtn}
-                          onPress={() => { setSelected(null); router.push({ pathname: '/new-request', params: { targetId: selected.id } }); }}
-                        >
-                          <Text style={styles.messageBtnText}>🙋 Request Help Directly</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.giftBtn}
-                          onPress={() => openGiftModal(selected)}
-                        >
-                          <Text style={styles.giftBtnText}>🎁 Gift Hours</Text>
-                        </TouchableOpacity>
-                      </>
-                    )}
-
-                    {status === 'none' && (
-                      <TouchableOpacity
-                        style={styles.connectBtn}
-                        onPress={() => { setSelected(null); sendConnectionRequest(selected); }}
-                        disabled={actionLoading}
-                      >
-                        <Text style={styles.connectBtnText}>Connect</Text>
-                      </TouchableOpacity>
-                    )}
-
-                    {status === 'pending_sent' && conn && (
-                      <View style={styles.pendingInfo}>
-                        <Text style={styles.pendingInfoText}>Connection request sent — waiting for them to accept.</Text>
-                        <TouchableOpacity
-                          style={styles.revokeBtn}
-                          onPress={() => declineConnection(conn)}
-                          disabled={actionLoading}
-                        >
-                          <Text style={styles.revokeBtnText}>Revoke Request</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-
-                    {status === 'pending_received' && conn && (
-                      <View style={styles.incomingActions}>
-                        <TouchableOpacity style={styles.acceptBtn} onPress={() => acceptConnection(conn)} disabled={actionLoading}>
-                          <Text style={styles.acceptBtnText}>Accept Request</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.declineBtn} onPress={() => declineConnection(conn)} disabled={actionLoading}>
-                          <Text style={styles.declineBtnText}>Decline</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-
-                    {status === 'connected' && (
-                      <TouchableOpacity
-                        style={styles.disconnectBtn}
-                        onPress={() => disconnectHousehold(selected.id)}
-                        disabled={actionLoading}
-                      >
-                        <Text style={styles.disconnectBtnText}>Disconnect</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                )}
-
-                {selected.id !== myHousehold?.id && (
-                  <View style={styles.safetyRow}>
-                    <TouchableOpacity onPress={() => openReportModal(selected)}>
-                      <Text style={styles.safetyLinkText}>Report</Text>
-                    </TouchableOpacity>
-                    <Text style={styles.safetyDivider}>·</Text>
-                    <TouchableOpacity onPress={() => blockHousehold(selected)} disabled={actionLoading}>
-                      <Text style={styles.safetyLinkText}>Block</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-                <TouchableOpacity style={styles.closeBtn} onPress={() => setSelected(null)}>
-                  <Text style={styles.closeBtnText}>Close</Text>
-                </TouchableOpacity>
-              </ScrollView>
-            );
-          })()}
-        </View>
-      </Modal>
-
-      {/* Gift Hours modal */}
-      <Modal
-        visible={!!giftTarget}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setGiftTarget(null)}
-      >
-        <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={() => setGiftTarget(null)} />
-        <View style={styles.sheet}>
-          <View style={styles.sheetHandle} />
-          {giftTarget && (
-            <ScrollView bounces={false} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">
-              <Text style={styles.sheetAnimal}>{getFamilyAnimal(giftTarget.id, giftTarget.animal)}</Text>
-              <Text style={styles.giftTitle}>Gift Hours to {giftTarget.name}</Text>
-              <Text style={styles.giftSub}>
-                Your balance: <Text style={{ fontWeight: '800', color: colors.sage }}>{myHousehold?.hours_balance ?? 0}h</Text>
-                {'  →  '}
-                <Text style={{ fontWeight: '800', color: (myHousehold?.hours_balance ?? 0) - giftHours < 0 ? colors.red : colors.sage }}>
-                  {(myHousehold?.hours_balance ?? 0) - giftHours}h
-                </Text>
-              </Text>
-
-              <Text style={styles.giftLabel}>Hours to gift</Text>
-              <View style={styles.giftHourGrid}>
-                {GIFT_HOUR_OPTIONS.map(h => (
-                  <TouchableOpacity
-                    key={h}
-                    style={[styles.giftHourBtn, giftHours === h && styles.giftHourBtnActive]}
-                    onPress={() => setGiftHours(h)}
-                  >
-                    <Text style={[styles.giftHourText, giftHours === h && styles.giftHourTextActive]}>{h}h</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <Text style={styles.giftLabel}>Message (optional)</Text>
-              <TextInput
-                style={styles.giftNoteInput}
-                placeholder="e.g. Thanks for watching the kids last week!"
-                placeholderTextColor={colors.textMuted}
-                value={giftNote}
-                onChangeText={setGiftNote}
-                multiline
-                numberOfLines={3}
-              />
-
-              <TouchableOpacity
-                style={[styles.giftSubmitBtn, giftLoading && { opacity: 0.6 }]}
-                onPress={submitGift}
-                disabled={giftLoading}
-              >
-                <Text style={styles.giftSubmitText}>
-                  {giftLoading ? 'Sending...' : `Send ${giftHours}h to ${giftTarget.name} 🎁`}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.closeBtn} onPress={() => setGiftTarget(null)}>
-                <Text style={styles.closeBtnText}>Cancel</Text>
-              </TouchableOpacity>
-            </ScrollView>
-          )}
-        </View>
-      </Modal>
-
-      <Modal
-        visible={!!reportTarget}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setReportTarget(null)}
-      >
-        <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={() => setReportTarget(null)} />
-        <View style={styles.sheet}>
-          <View style={styles.sheetHandle} />
-          {reportTarget && (
-            <ScrollView bounces={false} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">
-              <Text style={styles.giftTitle}>Report {reportTarget.name}</Text>
-              <Text style={styles.giftSub}>This goes to an admin for review, not to {reportTarget.name}.</Text>
-
-              <Text style={styles.giftLabel}>Reason</Text>
-              {['Inappropriate behavior', 'Safety concern', 'Spam', 'Other'].map(r => (
-                <TouchableOpacity
-                  key={r}
-                  style={[styles.reportReasonRow, reportReason === r && styles.reportReasonRowActive]}
-                  onPress={() => setReportReason(r)}
-                >
-                  <View style={[styles.radio, reportReason === r && styles.radioActive]} />
-                  <Text style={styles.reportReasonText}>{r}</Text>
-                </TouchableOpacity>
-              ))}
-
-              <Text style={styles.giftLabel}>Details (optional)</Text>
-              <TextInput
-                style={styles.giftNoteInput}
-                placeholder="Anything else the admin should know"
-                placeholderTextColor={colors.textMuted}
-                value={reportNote}
-                onChangeText={setReportNote}
-                multiline
-                numberOfLines={3}
-              />
-
-              <TouchableOpacity
-                style={[styles.giftSubmitBtn, (!reportReason || reportSubmitting) && { opacity: 0.6 }]}
-                onPress={submitReport}
-                disabled={!reportReason || reportSubmitting}
-              >
-                <Text style={styles.giftSubmitText}>{reportSubmitting ? 'Submitting...' : 'Submit Report'}</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.closeBtn} onPress={() => setReportTarget(null)}>
-                <Text style={styles.closeBtnText}>Cancel</Text>
-              </TouchableOpacity>
-            </ScrollView>
-          )}
-        </View>
-      </Modal>
+      <PersonProfileModal family={selected} onClose={() => setSelected(null)} onChanged={loadData} />
     </SafeAreaView>
   );
 }
@@ -799,6 +425,9 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingHorizontal: 20, paddingTop: 16, marginBottom: 4 },
   title: { fontSize: 24, fontWeight: '800', color: colors.text, marginBottom: 2 },
   subtitle: { fontSize: 13, color: colors.textMuted, fontWeight: '500', marginBottom: 4 },
+  messagesBtn: { backgroundColor: colors.card, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1.5, borderColor: colors.borderLight },
+  messagesBtnText: { fontSize: 13, fontWeight: '700', color: colors.text },
+  messageHint: { fontSize: 12, color: colors.textMuted, fontWeight: '500', marginBottom: 10, fontStyle: 'italic' },
 
   tabBar: {
     flexDirection: 'row', marginHorizontal: 20, marginBottom: 8,
@@ -841,66 +470,48 @@ const styles = StyleSheet.create({
   list: { paddingHorizontal: 20, paddingBottom: 32 },
 
   card: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 10,
+    flexDirection: 'row', alignItems: 'flex-start',
+    backgroundColor: colors.card, borderRadius: 18, padding: 14, marginBottom: 10,
     borderWidth: 1.5, borderColor: colors.borderLight,
   },
   cardSelf: { borderColor: colors.sage },
   cardAnimal: { fontSize: 32, marginRight: 12 },
   cardAvatarWrap: { marginRight: 12 },
-  cardInfo: { flex: 1 },
-  cardName: { fontSize: 15, fontWeight: '700', color: colors.text },
-  cardParents: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
+  cardAvatarSquare: { borderRadius: 14, backgroundColor: colors.sageLight, marginRight: 12 },
+  cardInfo: { flex: 1, gap: 3 },
+  cardName: { fontSize: 16, fontWeight: '700', color: colors.text },
+  cardParents: { fontSize: 13, color: colors.textSecondary },
+  cardChipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 3 },
+  cardChip: { backgroundColor: colors.background, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.borderLight },
+  cardChipText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
   chevron: { fontSize: 22, color: colors.textMuted, marginLeft: 8 },
 
-  connectedBadge: { backgroundColor: colors.sageLight, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.sage },
-  connectedBadgeText: { fontSize: 12, color: colors.sageDark, fontWeight: '700' },
   pendingBadge: { backgroundColor: colors.amberLight, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.amber },
   pendingBadgeText: { fontSize: 12, color: colors.amber, fontWeight: '700' },
   incomingBadge: { backgroundColor: colors.primaryLight, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.primary },
   incomingBadgeText: { fontSize: 12, color: colors.primaryDark, fontWeight: '700' },
 
+  pendingSection: { marginBottom: 18 },
+  pendingSectionLabel: { fontSize: 12, fontWeight: '700', color: colors.primaryDark, letterSpacing: 0.6, marginBottom: 10 },
+  connectedHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 },
+  connectedHeaderTitle: { fontSize: 19, fontWeight: '800', color: colors.text },
+  connectedHeaderCount: { fontSize: 12, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.4 },
   pendingCard: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 10,
-    borderWidth: 1.5, borderColor: colors.primary + '40',
+    backgroundColor: colors.primaryLight, borderRadius: 18, padding: 16, marginBottom: 14,
+    borderWidth: 1, borderColor: colors.primary + '30', gap: 14,
   },
-  pendingActions: { flexDirection: 'column', gap: 6 },
-  acceptBtn: { backgroundColor: colors.sage, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 7 },
-  acceptBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  declineBtn: { backgroundColor: colors.card, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 7, borderWidth: 1.5, borderColor: colors.border },
-  declineBtnText: { color: colors.textSecondary, fontWeight: '600', fontSize: 13 },
+  pendingCardRow: { flexDirection: 'row', alignItems: 'center' },
+  pendingWantsText: { fontSize: 13, color: colors.primaryDark, fontWeight: '600', marginTop: 2 },
+  pendingActions: { flexDirection: 'row', gap: 10 },
+  acceptBtn: { flex: 2, backgroundColor: colors.sageDark, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
+  acceptBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  declineBtn: { flex: 1, backgroundColor: colors.card, borderRadius: 14, paddingVertical: 14, alignItems: 'center', borderWidth: 1.5, borderColor: colors.borderLight },
+  declineBtnText: { color: colors.primaryDark, fontWeight: '700', fontSize: 15 },
 
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40 },
   emptyEmoji: { fontSize: 52, marginBottom: 16 },
   emptyTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: 8, textAlign: 'center' },
   emptyText: { fontSize: 14, color: colors.textSecondary, textAlign: 'center', lineHeight: 22 },
-
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
-  sheet: {
-    backgroundColor: colors.card,
-    borderTopLeftRadius: 28, borderTopRightRadius: 28,
-    maxHeight: '80%',
-  },
-  sheetHandle: {
-    width: 40, height: 4, backgroundColor: colors.border,
-    borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 4,
-  },
-  sheetContent: { paddingHorizontal: 24, paddingBottom: 44, alignItems: 'center' },
-  sheetAnimal: { fontSize: 64, marginTop: 8, marginBottom: 8 },
-  sheetName: { fontSize: 22, fontWeight: '800', color: colors.text, marginBottom: 20, textAlign: 'center' },
-
-  connectHint: { fontSize: 13, color: colors.textMuted, textAlign: 'center', marginBottom: 14, fontStyle: 'italic' },
-  infoRow: { flexDirection: 'row', alignItems: 'flex-start', width: '100%', marginBottom: 14 },
-  infoLabel: { fontSize: 12, fontWeight: '800', color: colors.sage, textTransform: 'uppercase', letterSpacing: 0.6, width: 72, paddingTop: 2 },
-  infoRight: { flex: 1 },
-  infoValue: { fontSize: 15, color: colors.text, fontWeight: '600' },
-  careNoteText: { fontSize: 12, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
-  infoSub: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
-
-  serviceChips: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  serviceChip: { backgroundColor: colors.sageLight, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: colors.sage },
-  serviceChipText: { fontSize: 13, color: colors.sageDark, fontWeight: '600' },
 
   categoryFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
   categoryChip: {
@@ -911,71 +522,4 @@ const styles = StyleSheet.create({
   categoryChipText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
   categoryChipTextActive: { color: colors.sageDark },
 
-  actionButtons: { width: '100%', gap: 10, marginTop: 16 },
-  messageBtn: {
-    backgroundColor: colors.primary, borderRadius: 16, paddingVertical: 16,
-    alignItems: 'center', width: '100%',
-    shadowColor: colors.primary, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 4,
-  },
-  messageBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  connectBtn: {
-    backgroundColor: colors.sage, borderRadius: 16, paddingVertical: 16,
-    alignItems: 'center', width: '100%',
-    shadowColor: colors.sage, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 4,
-  },
-  connectBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  pendingInfo: { backgroundColor: colors.amberLight, borderRadius: 14, padding: 14, width: '100%', borderWidth: 1, borderColor: colors.amber, gap: 10 },
-  pendingInfoText: { fontSize: 14, color: colors.amber, fontWeight: '600', textAlign: 'center' },
-  revokeBtn: { alignItems: 'center', paddingVertical: 8 },
-  revokeBtnText: { color: colors.red, fontWeight: '700', fontSize: 13 },
-  incomingActions: { width: '100%', gap: 10 },
-  disconnectBtn: {
-    borderRadius: 16, paddingVertical: 14, alignItems: 'center', width: '100%',
-    borderWidth: 1.5, borderColor: colors.border, marginTop: 4,
-  },
-  disconnectBtnText: { fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
-
-  safetyRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 14 },
-  safetyLinkText: { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
-  safetyDivider: { fontSize: 13, color: colors.textMuted },
-  reportReasonRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10,
-    paddingHorizontal: 12, borderRadius: 12, borderWidth: 1.5, borderColor: colors.borderLight, marginBottom: 8,
-  },
-  reportReasonRowActive: { borderColor: colors.primary, backgroundColor: colors.primaryLight },
-  radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.border },
-  radioActive: { borderColor: colors.primary, backgroundColor: colors.primary },
-  reportReasonText: { fontSize: 14, color: colors.text, fontWeight: '600' },
-
-  closeBtn: { marginTop: 10, borderRadius: 16, paddingVertical: 15, alignItems: 'center', width: '100%', borderWidth: 1.5, borderColor: colors.border },
-  closeBtnText: { fontSize: 15, color: colors.textSecondary, fontWeight: '700' },
-
-  giftBtn: {
-    borderRadius: 16, paddingVertical: 14, alignItems: 'center', width: '100%',
-    borderWidth: 1.5, borderColor: colors.sage, backgroundColor: colors.sageLight,
-  },
-  giftBtnText: { fontSize: 15, color: colors.sageDark, fontWeight: '700' },
-
-  giftTitle: { fontSize: 20, fontWeight: '800', color: colors.text, marginBottom: 6, textAlign: 'center' },
-  giftSub: { fontSize: 14, color: colors.textSecondary, marginBottom: 20, textAlign: 'center' },
-  giftLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary, alignSelf: 'flex-start', marginBottom: 8, marginTop: 12 },
-  giftHourGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, width: '100%' },
-  giftHourBtn: {
-    paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12,
-    borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.card,
-  },
-  giftHourBtnActive: { backgroundColor: colors.sage, borderColor: colors.sage },
-  giftHourText: { fontSize: 15, fontWeight: '700', color: colors.text },
-  giftHourTextActive: { color: '#fff' },
-  giftNoteInput: {
-    width: '100%', backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border,
-    borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14,
-    fontSize: 15, color: colors.text, textAlignVertical: 'top', minHeight: 90,
-  },
-  giftSubmitBtn: {
-    width: '100%', backgroundColor: colors.sage, borderRadius: 16, paddingVertical: 17,
-    alignItems: 'center', marginTop: 20,
-    shadowColor: colors.sage, shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 4,
-  },
-  giftSubmitText: { color: '#fff', fontSize: 16, fontWeight: '800' },
 });

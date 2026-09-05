@@ -298,8 +298,8 @@ export default function NewRequestScreen() {
       : ERRAND_TYPES.find(s => s.key === errandType)?.label ?? errandType;
 
     const categoryDetails =
-      category === 'kid_sit'           ? { location: kidLocation! }
-      : category === 'dog'             ? { pet_name: petName.trim(), dog_task: dogTask }
+      category === 'kid_sit'           ? { location: kidLocation!, timing_flexible: (timingFlexible && !isOvernight) || undefined }
+      : category === 'dog'             ? { pet_name: petName.trim(), dog_task: dogTask, timing_flexible: (timingFlexible && !isOvernight) || undefined }
       : category === 'manual_labor'    ? { labor_description: laborDescription.trim(), actual_hours: duration, timing_flexible: timingFlexible || undefined }
       : category === 'professional'    ? { service_type: resolvedService, timing_flexible: timingFlexible || undefined }
       : category === 'cooking'         ? { cooking_type: resolvedCooking, timing_flexible: timingFlexible || undefined }
@@ -698,8 +698,11 @@ export default function NewRequestScreen() {
                 </>
               )}
 
-              {/* Timing flexible toggle */}
-              {(category === 'manual_labor' || category === 'professional' || category === 'cooking' || category === 'elder_care' || category === 'physical_training' || category === 'errands') && (
+              {/* Timing flexible toggle — for kid-sitting/pet care this only
+                  applies outside overnight mode, which already has its own
+                  fixed drop-off/pick-up window. */}
+              {(category === 'manual_labor' || category === 'professional' || category === 'cooking' || category === 'elder_care' || category === 'physical_training' || category === 'errands'
+                || ((category === 'kid_sit' || category === 'dog') && !isOvernight)) && (
                 <View style={[styles.switchRow, { backgroundColor: themeLightColor, borderColor: themeColor + '40' }]}>
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.switchLabel, { color: themeColor }]}>⏰ Timing flexible</Text>
@@ -781,7 +784,15 @@ export default function NewRequestScreen() {
                           <Text style={styles.pickerText}>{toDateDisplay(flexEndDate)}</Text>
                         </TouchableOpacity>
                       </View>
-                      {showDatePicker && <DateTimePicker value={date} mode="date" minimumDate={new Date()} onChange={(_, s) => { setShowDatePicker(false); if (s) setDate(s); }} />}
+                      {showDatePicker && <DateTimePicker value={date} mode="date" minimumDate={new Date()} onChange={(_, s) => {
+                        setShowDatePicker(false);
+                        if (!s) return;
+                        setDate(s);
+                        // Keep the window valid — pushing "From" past the
+                        // current "To" would otherwise leave an invalid
+                        // end-before-start window sitting there silently.
+                        if (s > flexEndDate) setFlexEndDate(s);
+                      }} />}
                       {showFlexEndDatePicker && <DateTimePicker value={flexEndDate} mode="date" minimumDate={date} onChange={(_, s) => { setShowFlexEndDatePicker(false); if (s) setFlexEndDate(s); }} />}
                       <Text style={[styles.flexNote, { color: themeColor }]}>Other people will know you're open to any time in this window</Text>
                     </>

@@ -4,7 +4,6 @@ import {
   RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Text } from '../../components/Text';
@@ -13,24 +12,12 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import { getPendingBreakdown } from '../../lib/hours';
+import { StatusBadge } from '../../components/StatusBadge';
+import { HourBalanceCard } from '../../components/HourBalanceCard';
+import { OnboardingIntro } from '../../components/OnboardingIntro';
+import { HomeItemRow } from '../../components/HomeItemRow';
 import type { Request, RequestCategory } from '../../types';
 
-function postStatusInfo(status: Request['status']): { label: string; color: string; bg: string } {
-  if (status === 'accepted' || status === 'completed') return { label: 'Accepted', color: colors.blue, bg: colors.blueLight };
-  if (status === 'offered') return { label: 'Pending', color: colors.amber, bg: colors.amberLight };
-  return { label: 'Available', color: colors.sageDark, bg: colors.greenLight };
-}
-
-const HELP_CATEGORY_LABELS: Record<RequestCategory, { emoji: string; label: string }> = {
-  kid_sit:           { emoji: '👧', label: 'Kid-sitting' },
-  dog:               { emoji: '🐾', label: 'Pet care' },
-  manual_labor:      { emoji: '🔨', label: 'Manual labor' },
-  professional:      { emoji: '🎓', label: 'Professional help' },
-  cooking:           { emoji: '🍳', label: 'Cooking' },
-  elder_care:        { emoji: '🤝', label: 'Elder care' },
-  physical_training: { emoji: '🏃', label: 'Fitness' },
-  errands:           { emoji: '🛒', label: 'Errands' },
-};
 
 export default function HomeScreen() {
   const { family, refreshFamily } = useAuth();
@@ -38,14 +25,19 @@ export default function HomeScreen() {
   const [myItems, setMyItems] = useState<Request[]>([]);
   const [pendingIncoming, setPendingIncoming] = useState(0);
   const [pendingOutgoing, setPendingOutgoing] = useState(0);
+  const [pendingIncomingCount, setPendingIncomingCount] = useState(0);
+  const [pendingOutgoingCount, setPendingOutgoingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [onboardingSeen, setOnboardingSeen] = useState(true);
+  const [showIntro, setShowIntro] = useState(false);
   const alertedConnectionIds = useRef<Set<string>>(new Set());
 
   // The onboarding banner is meant for a brand-new user's first visit —
   // once they've seen the home screen once, it stops reappearing even if
-  // they never finished filling in their profile.
+  // they never finished filling in their profile. The same "haven't seen
+  // Home before" moment is also the right time to show the two-screen
+  // intro (what the app is, how hours work) — same check, same key.
   useEffect(() => {
     if (!family?.id) return;
     const key = `onboarding_seen_${family.id}`;
@@ -54,6 +46,7 @@ export default function HomeScreen() {
         setOnboardingSeen(true);
       } else {
         setOnboardingSeen(false);
+        setShowIntro(true);
         AsyncStorage.setItem(key, 'true');
       }
     });
@@ -94,7 +87,9 @@ export default function HomeScreen() {
   }
 
   async function loadData() {
-    const today = new Date().toISOString().split('T')[0];
+    // No date filter here — an open or pending request whose date already
+    // passed without being resolved still needs attention, not silence.
+    // "Coming Up" filters to upcoming itself, further down.
     const { data: reqs } = family
       ? await supabase
           .from('requests')
@@ -102,15 +97,16 @@ export default function HomeScreen() {
           .eq('post_type', 'request')
           .or(`requesting_family_id.eq.${family.id},fulfilling_family_id.eq.${family.id}`)
           .in('status', ['open', 'offered', 'accepted'])
-          .gte('date', today)
           .order('date', { ascending: true })
       : { data: [] };
     setMyItems(reqs ?? []);
     setLoading(false);
     if (family) {
-      const { incoming, outgoing } = await getPendingBreakdown(family.id);
-      setPendingIncoming(incoming);
-      setPendingOutgoing(outgoing);
+      const breakdown = await getPendingBreakdown(family.id);
+      setPendingIncoming(breakdown.incoming);
+      setPendingOutgoing(breakdown.outgoing);
+      setPendingIncomingCount(breakdown.incomingCount);
+      setPendingOutgoingCount(breakdown.outgoingCount);
     }
   }
 
@@ -130,7 +126,6 @@ export default function HomeScreen() {
   }
 
   const balance = family?.hours_balance ?? 0;
-  const balanceColor = balance < 0 ? colors.red : balance <= 3 ? colors.amber : '#fff';
 
   const myRequests = myItems.filter(r => r.requesting_family_id === family?.id);
   const myRequestsOpen = myRequests.filter(r => r.status === 'open');
@@ -139,10 +134,14 @@ export default function HomeScreen() {
 
   const helpingPending = myItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'offered');
   const helpingScheduled = myItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'accepted');
+  const today = new Date().toISOString().split('T')[0];
+  // Multi-day (overnight) items aren't "past" until their end date, not
+  // their start/drop-off date.
   const comingUp = Array.from(new Map(
-    [...myRequestsScheduled, ...helpingScheduled].map(r => [r.id, r])
+    [...myRequestsScheduled, ...helpingScheduled]
+      .filter(r => (r.end_date ?? r.date) >= today)
+      .map(r => [r.id, r])
   ).values());
-  const servicesOffered = (family?.services_offered ?? []) as RequestCategory[];
 
   const isNewUser = (!family?.parent1_name || !family?.parent1_phone) && !onboardingSeen;
 
@@ -155,7 +154,13 @@ export default function HomeScreen() {
     return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   }
 
+  function metaLine(r: Request) {
+    return `${formatDate(r.date).toUpperCase()} · ${r.start_time} · ${r.duration_hours}H`;
+  }
+
   return (
+    <>
+    <OnboardingIntro visible={showIntro} onDone={() => setShowIntro(false)} />
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -192,58 +197,14 @@ export default function HomeScreen() {
         )}
 
         {/* Balance Card */}
-        <TouchableOpacity activeOpacity={0.85} onPress={() => router.push('/history')}>
-          <LinearGradient
-            colors={[colors.sage, colors.sageDark]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.balanceCard}
-          >
-            <View style={styles.balanceCardInner}>
-              <Text style={styles.balanceLabel}>Your Hour Bank</Text>
-              <View style={styles.balanceNumberRow}>
-                <Text style={[styles.balanceNumber, { color: balanceColor }]} numberOfLines={1} adjustsFontSizeToFit>
-                  {balance}h
-                </Text>
-                <Text style={styles.balanceAvailableLabel}>available</Text>
-              </View>
-              {(pendingIncoming !== 0 || pendingOutgoing !== 0) && (
-                <View style={styles.balancePendingRows}>
-                  {pendingIncoming !== 0 && (
-                    <View style={styles.balancePendingRow}>
-                      <Text style={styles.balancePendingLine}>🕐 +{pendingIncoming}h on the way</Text>
-                      <Text style={styles.balancePendingHint}>When others accept your help</Text>
-                    </View>
-                  )}
-                  {pendingOutgoing !== 0 && (
-                    <View style={styles.balancePendingRow}>
-                      <Text style={styles.balancePendingLine}>✨ -{pendingOutgoing}h possible</Text>
-                      <Text style={styles.balancePendingHint}>If your requests are fulfilled</Text>
-                    </View>
-                  )}
-                </View>
-              )}
-              <Text style={styles.balanceSub}>
-                {balance === -20
-                  ? 'Balance limit reached — babysit for someone to earn more'
-                  : balance < 0
-                  ? `${20 + balance}h until you hit the -20h limit`
-                  : `You have ${balance + 20}h of requesting power`}
-              </Text>
-              <View style={styles.progressBarBg}>
-                <View style={[
-                  styles.progressBarFill,
-                  { width: `${Math.max(4, Math.min(100, ((balance + 20) / 20) * 50))}%` },
-                ]} />
-              </View>
-              <View style={styles.progressLabels}>
-                <Text style={styles.progressLabel}>-20h limit</Text>
-                <Text style={styles.progressLabel}>No upper limit</Text>
-              </View>
-              <Text style={styles.balanceHistoryHint}>View history →</Text>
-            </View>
-          </LinearGradient>
-        </TouchableOpacity>
+        <HourBalanceCard
+          balance={balance}
+          pendingIncoming={pendingIncoming}
+          pendingOutgoing={pendingOutgoing}
+          pendingIncomingCount={pendingIncomingCount}
+          pendingOutgoingCount={pendingOutgoingCount}
+          onPress={() => router.push('/history')}
+        />
 
         {/* Quick actions */}
         <View style={styles.actions}>
@@ -266,28 +227,18 @@ export default function HomeScreen() {
                 {comingUp.map(r => {
                   const isHelping = r.fulfilling_family_id === family?.id;
                   const relatedName = isHelping ? r.requesting_family?.name : r.fulfilling_family?.name;
-                  const helperText = isHelping
-                    ? `You’re helping ${relatedName ?? 'someone'}`
-                    : `${relatedName ?? 'Someone'} is helping you`;
-
                   return (
-                    <TouchableOpacity key={r.id} style={[styles.itemCard, isHelping ? styles.sitCard : styles.itemCardAccepted]} onPress={() => router.push(`/request/${r.id}`)}>
-                      <View style={styles.itemCardLeft}>
-                        <Text style={styles.itemAnimal}>
-                          {getFamilyAnimal(r.requesting_family_id, r.requesting_family?.animal ?? null)}
-                        </Text>
-                        <View style={styles.itemInfo}>
-                          <Text style={styles.itemTitle}>{r.title}</Text>
-                          <Text style={styles.itemSub}>{helperText}</Text>
-                          <Text style={styles.itemDate}>{formatDate(r.date)} at {r.start_time}</Text>
-                        </View>
-                      </View>
-                      {!isHelping && (
-                        <View style={styles.earnBadge}>
-                          <Text style={styles.earnBadgeText}>+{r.duration_hours}h</Text>
-                        </View>
-                      )}
-                    </TouchableOpacity>
+                    <HomeItemRow
+                      key={r.id}
+                      animalEmoji={getFamilyAnimal(r.requesting_family_id, r.requesting_family?.animal ?? null)}
+                      title={r.title}
+                      subtitle={isHelping ? `You're helping ${relatedName ?? 'someone'}` : `${relatedName ?? 'Someone'} is helping you`}
+                      meta={metaLine(r)}
+                      amountText={`${isHelping ? '+' : '-'}${r.duration_hours}h`}
+                      earning={isHelping}
+                      accentColor={isHelping ? colors.sage : colors.primary}
+                      onPress={() => router.push(`/request/${r.id}`)}
+                    />
                   );
                 })}
               </>
@@ -297,81 +248,37 @@ export default function HomeScreen() {
             {myRequestsOpen.length > 0 && (
               <>
                 <Text style={styles.sectionTitle}>My Requests</Text>
-                <Text style={styles.sectionSubtitle}>Open</Text>
                 {myRequestsOpen.map(r => (
-                  <TouchableOpacity
+                  <HomeItemRow
                     key={r.id}
-                    style={[styles.itemCard, styles.itemCardOpen]}
+                    animalEmoji={getFamilyAnimal(r.requesting_family_id, r.requesting_family?.animal ?? null)}
+                    title={r.title}
+                    subtitle="No helper yet"
+                    meta={metaLine(r)}
+                    statusPill={<StatusBadge status={r.status} />}
+                    accentColor={colors.border}
                     onPress={() => router.push(`/request/${r.id}`)}
-                  >
-                    <View style={styles.itemCardLeft}>
-                      <View style={styles.pillStack}>
-                        <View style={[styles.postTypePill, { backgroundColor: postStatusInfo(r.status).bg }]}>
-                          <Text style={[styles.postTypePillText, { color: postStatusInfo(r.status).color }]}>{postStatusInfo(r.status).label}</Text>
-                        </View>
-                      </View>
-                      <View style={styles.itemInfo}>
-                        <Text style={styles.itemTitle}>{r.title}</Text>
-                        <Text style={styles.itemSub}>No helper yet</Text>
-                        <Text style={styles.itemDate}>{formatDate(r.date)} at {r.start_time}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.chevron}>›</Text>
-                  </TouchableOpacity>
+                  />
                 ))}
               </>
             )}
 
             {myRequestsPending.length > 0 && (
               <>
-                <Text style={styles.sectionSubtitle}>Pending</Text>
+                {myRequestsOpen.length === 0 && <Text style={styles.sectionTitle}>My Requests</Text>}
                 {myRequestsPending.map(r => (
-                  <TouchableOpacity
+                  <HomeItemRow
                     key={r.id}
-                    style={[styles.itemCard, styles.itemCardPending]}
+                    animalEmoji={getFamilyAnimal(r.fulfilling_family_id ?? r.requesting_family_id, r.fulfilling_family?.animal ?? null)}
+                    title={r.title}
+                    subtitle={`${r.fulfilling_family?.name} offered to help`}
+                    meta={metaLine(r)}
+                    statusPill={<StatusBadge status={r.status} />}
+                    amountText={`-${r.duration_hours}h`}
+                    earning={false}
+                    accentColor={colors.amber}
                     onPress={() => router.push(`/request/${r.id}`)}
-                  >
-                    <View style={styles.itemCardLeft}>
-                      <View style={styles.pillStack}>
-                        <View style={[styles.postTypePill, { backgroundColor: postStatusInfo(r.status).bg }]}>
-                          <Text style={[styles.postTypePillText, { color: postStatusInfo(r.status).color }]}>{postStatusInfo(r.status).label}</Text>
-                        </View>
-                      </View>
-                      <View style={styles.itemInfo}>
-                        <Text style={styles.itemTitle}>{r.title}</Text>
-                        <Text style={styles.itemSub}>{r.fulfilling_family?.name} offered to help</Text>
-                        <Text style={styles.itemDate}>{formatDate(r.date)} at {r.start_time}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.chevron}>›</Text>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
-            {myRequestsScheduled.length > 0 && (
-              <>
-                <Text style={styles.sectionSubtitle}>Scheduled</Text>
-                {myRequestsScheduled.map(r => (
-                  <TouchableOpacity
-                    key={r.id}
-                    style={[styles.itemCard, styles.itemCardAccepted]}
-                    onPress={() => router.push(`/request/${r.id}`)}
-                  >
-                    <View style={styles.itemCardLeft}>
-                      <View style={styles.pillStack}>
-                        <View style={[styles.postTypePill, { backgroundColor: postStatusInfo(r.status).bg }]}>
-                          <Text style={[styles.postTypePillText, { color: postStatusInfo(r.status).color }]}>{postStatusInfo(r.status).label}</Text>
-                        </View>
-                      </View>
-                      <View style={styles.itemInfo}>
-                        <Text style={styles.itemTitle}>{r.title}</Text>
-                        <Text style={styles.itemSub}>{r.fulfilling_family?.name} is confirmed to help you</Text>
-                        <Text style={styles.itemDate}>{formatDate(r.date)} at {r.start_time}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.chevron}>›</Text>
-                  </TouchableOpacity>
+                  />
                 ))}
               </>
             )}
@@ -379,85 +286,29 @@ export default function HomeScreen() {
             {/* Requests created by others that I offered to help with */}
             {helpingPending.length > 0 && (
               <>
-                <Text style={styles.sectionTitle}>I’m Helping</Text>
-                <Text style={styles.sectionSubtitle}>Pending</Text>
+                <Text style={styles.sectionTitle}>I'm Helping</Text>
                 {helpingPending.map(r => (
-                  <TouchableOpacity
+                  <HomeItemRow
                     key={r.id}
-                    style={[styles.itemCard, styles.itemCardPending]}
+                    animalEmoji={getFamilyAnimal(r.requesting_family_id, r.requesting_family?.animal ?? null)}
+                    title={r.title}
+                    subtitle={`You offered to help ${r.requesting_family?.name}`}
+                    meta={metaLine(r)}
+                    statusPill={<StatusBadge status={r.status} />}
+                    amountText={`+${r.duration_hours}h`}
+                    earning={true}
+                    accentColor={colors.amber}
                     onPress={() => router.push(`/request/${r.id}`)}
-                  >
-                    <View style={styles.itemCardLeft}>
-                      <View style={styles.pillStack}>
-                        <View style={[styles.postTypePill, { backgroundColor: postStatusInfo(r.status).bg }]}>
-                          <Text style={[styles.postTypePillText, { color: postStatusInfo(r.status).color }]}>{postStatusInfo(r.status).label}</Text>
-                        </View>
-                      </View>
-                      <View style={styles.itemInfo}>
-                        <Text style={styles.itemTitle}>{r.title}</Text>
-                        <Text style={styles.itemSub}>You offered to help {r.requesting_family?.name}</Text>
-                        <Text style={styles.itemDate}>{formatDate(r.date)} at {r.start_time}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.chevron}>›</Text>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
-            {helpingScheduled.length > 0 && (
-              <>
-                <Text style={styles.sectionSubtitle}>Scheduled</Text>
-                {helpingScheduled.map(r => (
-                  <TouchableOpacity
-                    key={r.id}
-                    style={[styles.itemCard, styles.sitCard]}
-                    onPress={() => router.push(`/request/${r.id}`)}
-                  >
-                    <View style={styles.itemCardLeft}>
-                      <View style={styles.pillStack}>
-                        <View style={[styles.postTypePill, { backgroundColor: postStatusInfo(r.status).bg }]}>
-                          <Text style={[styles.postTypePillText, { color: postStatusInfo(r.status).color }]}>{postStatusInfo(r.status).label}</Text>
-                        </View>
-                      </View>
-                      <View style={styles.itemInfo}>
-                        <Text style={styles.itemTitle}>{r.title}</Text>
-                        <Text style={styles.itemSub}>You’re confirmed to help {r.requesting_family?.name}</Text>
-                        <Text style={styles.itemDate}>{formatDate(r.date)} at {r.start_time}</Text>
-                      </View>
-                    </View>
-                    <View style={styles.earnBadge}>
-                      <Text style={styles.earnBadgeText}>+{r.duration_hours}h</Text>
-                    </View>
-                  </TouchableOpacity>
+                  />
                 ))}
               </>
             )}
           </>
         )}
 
-        {/* What I'm offering to help with */}
-        <View style={styles.offerCard}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.offerLabel}>You're open to helping with</Text>
-            {servicesOffered.length === 0 ? (
-              <Text style={styles.offerEmpty}>Nothing set yet — add what you're willing to help with in your profile.</Text>
-            ) : (
-              <View style={styles.offerChips}>
-                {servicesOffered.map(key => (
-                  <View key={key} style={styles.offerChip}>
-                    <Text style={styles.offerChipText}>{HELP_CATEGORY_LABELS[key]?.emoji} {HELP_CATEGORY_LABELS[key]?.label ?? key}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-          </View>
-          <TouchableOpacity onPress={() => router.push('/(tabs)/profile')}>
-            <Text style={styles.offerEditLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
       </ScrollView>
     </SafeAreaView>
+    </>
   );
 }
 
@@ -506,7 +357,7 @@ const styles = StyleSheet.create({
   progressLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
   progressLabel: { fontSize: 11, color: 'rgba(255,255,255,0.6)', fontWeight: '500' },
 
-  actions: { flexDirection: 'row', gap: 12, marginBottom: 28 },
+  actions: { flexDirection: 'row', gap: 14, marginBottom: 28 },
   actionPrimary: {
     flex: 1, backgroundColor: colors.primary, borderRadius: 16, paddingVertical: 16, alignItems: 'center',
     shadowColor: colors.primary, shadowOpacity: 0.3, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 4,
@@ -518,51 +369,6 @@ const styles = StyleSheet.create({
   },
   actionSecondaryText: { fontSize: 14, fontWeight: '700', color: colors.text },
 
-  offerCard: {
-    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
-    backgroundColor: colors.sageLight, borderRadius: 16, padding: 16, marginBottom: 20,
-    borderWidth: 1.5, borderColor: colors.sage + '40',
-  },
-  offerLabel: { fontSize: 13, fontWeight: '700', color: colors.sageDark, marginBottom: 8 },
-  offerEmpty: { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },
-  offerChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  offerChip: { backgroundColor: colors.card, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: colors.sage + '50' },
-  offerChipText: { fontSize: 12, fontWeight: '600', color: colors.text },
-  offerEditLink: { fontSize: 13, fontWeight: '700', color: colors.primary },
 
   sectionTitle: { fontSize: 17, fontWeight: '700', color: colors.text, marginBottom: 10, marginTop: 4 },
-  sectionSubtitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: colors.textSecondary,
-    marginTop: 2,
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 0.7,
-  },
-
-  itemCard: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 10,
-    borderWidth: 1.5, borderColor: colors.borderLight,
-  },
-  sitCard: { borderColor: colors.sage + '60', backgroundColor: colors.sageLight },
-  itemCardOpen: { borderColor: colors.green + '60' },
-  itemCardPending: { borderColor: colors.amber, backgroundColor: colors.amberLight },
-  itemCardAccepted: { borderColor: colors.blue, backgroundColor: colors.blueLight },
-  itemCardLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  pillStack: { gap: 4, marginRight: 10, alignItems: 'flex-start' },
-  postTypePill: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, alignSelf: 'flex-start' },
-  postTypePillText: { fontSize: 10, fontWeight: '700', color: '#fff' },
-  itemAnimal: { fontSize: 28, marginRight: 12 },
-  itemStatusEmoji: { fontSize: 22, marginRight: 12 },
-  itemInfo: { flex: 1 },
-  itemTitle: { fontSize: 15, fontWeight: '700', color: colors.text, marginBottom: 2 },
-  itemSub: { fontSize: 13, color: colors.textSecondary, fontWeight: '500', marginBottom: 2 },
-  itemDate: { fontSize: 12, color: colors.textMuted, fontWeight: '500' },
-  earnBadge: {
-    backgroundColor: colors.sage, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5,
-  },
-  earnBadgeText: { color: '#fff', fontWeight: '800', fontSize: 14 },
-  chevron: { fontSize: 22, color: colors.textMuted, marginLeft: 8 },
 });

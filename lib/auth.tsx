@@ -48,6 +48,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (session?.user.id) await loadFamily(session.user.id);
   }
 
+  // Balance can change from outside this device's own actions — an admin
+  // adjustment, a gift, a settlement someone else triggered — with no
+  // screen navigation here to prompt a refetch. Without this, the hour
+  // bank silently goes stale until something else happens to reload it.
+  useEffect(() => {
+    if (!family?.id) return;
+    const channel = supabase
+      .channel(`family_self_${family.id}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'families', filter: `id=eq.${family.id}` },
+        (payload) => setFamily(payload.new as Family))
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [family?.id]);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);

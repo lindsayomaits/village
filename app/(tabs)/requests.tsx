@@ -1,29 +1,22 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, ActivityIndicator, Alert,
+  RefreshControl, ActivityIndicator, Alert, ScrollView,
 } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
 import { Text } from '../../components/Text';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
-import { colors } from '../../lib/theme';
+import { colors, buttonStyles } from '../../lib/theme';
+import { getFamilyAnimal } from '../../lib/animals';
 import { notifyFamily } from '../../lib/notifications';
-import type { Request, RequestCategory } from '../../types';
+import { StatusBadge } from '../../components/StatusBadge';
+import { ModifierBadge } from '../../components/ModifierBadge';
+import type { Request } from '../../types';
 
 type Filter = 'open' | 'mine' | 'upcoming';
-
-const ALL_CATEGORIES: { key: RequestCategory; emoji: string; label: string }[] = [
-  { key: 'kid_sit',           emoji: '👧', label: 'Kid-sitting' },
-  { key: 'dog',               emoji: '🐾', label: 'Pet care' },
-  { key: 'manual_labor',      emoji: '🔨', label: 'Labor' },
-  { key: 'professional',      emoji: '🎓', label: 'Professional' },
-  { key: 'cooking',           emoji: '🍳', label: 'Cooking' },
-  { key: 'elder_care',        emoji: '🤝', label: 'Elder care' },
-  { key: 'physical_training', emoji: '🏃', label: 'Fitness' },
-  { key: 'errands',           emoji: '🛒', label: 'Errands' },
-];
 
 export default function RequestsScreen() {
   const { family, refreshFamily } = useAuth();
@@ -31,7 +24,6 @@ export default function RequestsScreen() {
   const params = useLocalSearchParams<{ filter?: string }>();
   const [requests, setRequests] = useState<Request[]>([]);
   const [connectedIds, setConnectedIds] = useState<string[]>([]);
-  const [catFilter, setCatFilter] = useState<RequestCategory | 'all'>('all');
   const [filter, setFilter] = useState<Filter>('open');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -69,7 +61,6 @@ export default function RequestsScreen() {
       .order('date', { ascending: true })
       .order('start_time', { ascending: true });
 
-    if (catFilter !== 'all') query = query.eq('category', catFilter);
 
     if (filter === 'open') {
       // A request sent directly to one household (target_household_id set)
@@ -96,8 +87,8 @@ export default function RequestsScreen() {
     // Past-due (date already gone, still unresolved) sinks to the bottom
     // instead of cluttering the top of an ascending date sort.
     const sorted = [...(data ?? [])].sort((a, b) => {
-      const aPast = a.status !== 'completed' && a.date < today;
-      const bPast = b.status !== 'completed' && b.date < today;
+      const aPast = a.status !== 'completed' && (a.end_date ?? a.date) < today;
+      const bPast = b.status !== 'completed' && (b.end_date ?? b.date) < today;
       if (aPast !== bPast) return aPast ? 1 : -1;
       if (!aPast && a.is_urgent !== b.is_urgent) return a.is_urgent ? -1 : 1;
       if (a.date !== b.date) return a.date < b.date ? -1 : 1;
@@ -111,7 +102,7 @@ export default function RequestsScreen() {
     if (params.filter === 'open' || params.filter === 'mine' || params.filter === 'upcoming') setFilter(params.filter);
   }, [params.filter]);
 
-  useFocusEffect(useCallback(() => { loadRequests(); }, [filter, catFilter]));
+  useFocusEffect(useCallback(() => { loadRequests(); }, [filter]));
 
   async function onRefresh() {
     setRefreshing(true);
@@ -277,32 +268,51 @@ export default function RequestsScreen() {
     return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   }
 
-  function statusBadge(status: Request['status']) {
-    const map: Record<string, { bg: string; text: string; label: string }> = {
-      open:      { bg: colors.greenLight,  text: colors.sageDark, label: 'Available' },
-      offered:   { bg: colors.amberLight,  text: colors.amber, label: 'Pending' },
-      accepted:  { bg: colors.blueLight,   text: colors.blue,  label: 'Accepted' },
-      completed: { bg: colors.purpleLight, text: colors.purple, label: 'Completed' },
-      cancelled: { bg: colors.redLight,    text: colors.red,   label: 'Cancelled' },
-    };
-    const s = map[status] ?? map.open;
-    return <View style={[styles.badge, { backgroundColor: s.bg }]}><Text style={[styles.badgeText, { color: s.text }]}>{s.label}</Text></View>;
+  // A short fact about the specific category, shown as a fact chip —
+  // e.g. which house, what the dog needs, what the labor job is.
+  function categoryDetailText(item: Request): string | null {
+    const d = item.category_details as Record<string, string> | null;
+    if (!d) return null;
+    switch (item.category) {
+      case 'kid_sit': return d.location === 'kids_house' ? "🏠 At their house" : d.location === 'sitters_house' ? "🏡 At the sitter's house" : null;
+      case 'dog': {
+        const name = d.pet_name ?? d.dog_name;
+        const taskLabel = d.dog_task === 'walk' ? '🦮 Walking' : d.dog_task === 'house_check' ? '🏠 House check' : '🏡 Boarding';
+        return `${taskLabel}${name ? ` · ${name}` : ''}`;
+      }
+      case 'manual_labor': return d.labor_description ? `"${d.labor_description}"` : null;
+      case 'professional': return d.service_type ?? null;
+      case 'cooking': return d.cooking_type ?? null;
+      case 'elder_care': return d.elder_care_type ?? null;
+      case 'physical_training': return d.training_type ?? null;
+      case 'errands': return d.errand_type ?? null;
+      default: return null;
+    }
   }
 
-  function categoryBadge(category: RequestCategory | undefined) {
-    if (!category || category === 'kid_sit') return null;
-    const cfg: Record<string, { bg: string; text: string; label: string }> = {
-      dog:               { bg: colors.blueLight,   text: colors.blue,     label: '🐾 Pet care' },
-      manual_labor:      { bg: colors.amberLight,  text: colors.amber,    label: '🔨 Labor · 2× rate' },
-      professional:      { bg: colors.sageLight,   text: colors.sageDark, label: '🎓 Professional' },
-      cooking:           { bg: colors.purpleLight, text: colors.purple,   label: '🍳 Cooking' },
-      elder_care:        { bg: colors.amberLight,   text: colors.amber,    label: '🤝 Elder care' },
-      physical_training: { bg: colors.greenLight,   text: colors.sageDark, label: '🏃 Fitness' },
-      errands:           { bg: colors.blueLight,    text: colors.blue,     label: '🛒 Errands' },
-    };
-    const c = cfg[category];
-    if (!c) return null;
-    return <View style={[styles.catBadge, { backgroundColor: c.bg }]}><Text style={[styles.catBadgeText, { color: c.text }]}>{c.label}</Text></View>;
+  function FactChip({ text, earning }: { text: string; earning?: boolean }) {
+    const tinted = earning !== undefined;
+    const color = earning ? colors.sageDark : colors.primaryDark;
+    return (
+      <View style={[styles.factChip, tinted && { backgroundColor: earning ? colors.greenLight : colors.primaryLight, borderColor: 'transparent' }]}>
+        {tinted && <MaterialIcons name={earning ? 'call-received' : 'call-made'} size={11} color={color} />}
+        <Text style={[styles.factChipText, tinted && { color }]}>{text}</Text>
+      </View>
+    );
+  }
+
+  // Spells out both sides of the request plus its status in one line —
+  // especially important in "Scheduled," which mixes things you posted
+  // with things you offered to help with.
+  function roleLine(item: Request, isOwn: boolean, isFulfiller: boolean): string {
+    const requester = isOwn ? 'You' : (item.requesting_family?.name ?? 'Someone');
+    if (item.status === 'open') return `${requester} requested · No helper yet`;
+    const fulfiller = isFulfiller ? 'you' : (item.fulfilling_family?.name ?? 'someone');
+    if (item.status === 'offered') return `${requester} requested · ${isFulfiller ? 'You' : fulfiller[0].toUpperCase() + fulfiller.slice(1)} offered to help`;
+    if (item.status === 'accepted') return `${requester} requested · ${isFulfiller ? 'You' : fulfiller[0].toUpperCase() + fulfiller.slice(1)} confirmed to help`;
+    if (item.status === 'completed') return `${requester} requested · ${isFulfiller ? 'You' : fulfiller[0].toUpperCase() + fulfiller.slice(1)} helped`;
+    if (item.status === 'cancelled') return `${requester} requested · Cancelled`;
+    return requester;
   }
 
   // ── Card ───────────────────────────────────────────────────────
@@ -312,10 +322,19 @@ export default function RequestsScreen() {
     const isFulfiller = item.fulfilling_family_id === family?.id;
     const isConfirmed = item.status === 'accepted' || item.status === 'completed';
     const hasOffer = item.status === 'offered';
-    const isPastDue = item.status !== 'completed' && item.date < new Date().toISOString().split('T')[0];
+    // Multi-day (overnight) requests aren't past due until the actual end
+    // date passes, not the start/drop-off date.
+    const isPastDue = item.status !== 'completed' && (item.end_date ?? item.date) < new Date().toISOString().split('T')[0];
 
     const contactFamily = isOwn ? item.fulfilling_family : item.requesting_family;
     const showContact = (hasOffer || isConfirmed) && contactFamily;
+    const timingFlexible = (item.category_details as { timing_flexible?: boolean } | null)?.timing_flexible;
+    const sentToYou = !isOwn && item.target_household_id === family?.id;
+    const detailText = categoryDetailText(item);
+    const avatarEmoji = getFamilyAnimal(item.requesting_family_id, item.requesting_family?.animal ?? null);
+    // Direction is about the viewer's own hour consequence — helping earns
+    // you hours, your own request spends them once it's fulfilled.
+    const earning = isFulfiller || !isOwn;
 
     return (
       <TouchableOpacity
@@ -323,139 +342,102 @@ export default function RequestsScreen() {
         onPress={() => router.push(`/request/${item.id}`)}
         style={[styles.card, isPastDue && styles.cardPastDue, item.is_urgent && !isPastDue && styles.cardUrgent]}
       >
-        {item.is_urgent && !isPastDue && (
-          <View style={styles.urgentBanner}><Text style={styles.urgentBannerText}>❗️ URGENT</Text></View>
-        )}
-        <View style={styles.cardHeader}>
-          <Text style={[styles.cardTitle, isPastDue && styles.cardTitlePastDue]}>{item.title}</Text>
-          {isPastDue ? <View style={[styles.badge, styles.pastDueBadge]}><Text style={[styles.badgeText, styles.pastDueBadgeText]}>⏰ Past date</Text></View> : statusBadge(item.status)}
+        <View style={styles.topRow}>
+          <View style={styles.topLeftPills}>
+            {isPastDue ? (
+              <View style={[styles.badge, styles.pastDueBadge]}><Text style={[styles.badgeText, styles.pastDueBadgeText]}>⏰ Past date</Text></View>
+            ) : item.is_urgent ? (
+              <ModifierBadge kind="urgent" />
+            ) : (
+              <StatusBadge status={item.status} />
+            )}
+            {!isPastDue && item.category === 'manual_labor' && <ModifierBadge kind="rate2x" />}
+          </View>
+          <View style={styles.avatarSquare}><Text style={styles.avatarEmoji}>{avatarEmoji}</Text></View>
         </View>
 
+        <Text style={[styles.cardTitle, isPastDue && styles.cardTitlePastDue]}>{item.title}</Text>
         <Text style={styles.cardFamily}>
-          {isOwn ? 'Your request' : item.requesting_family?.name}
+          {roleLine(item, isOwn, isFulfiller)}
           {item.category === 'kid_sit' && item.kid_name ? `  ·  ${item.kid_name}` : ''}
         </Text>
 
-        {categoryBadge(item.category)}
+        <View style={styles.factRow}>
+          {item.is_overnight ? (
+            <>
+              <FactChip text={`${formatDate(item.date)} → ${formatDate(item.end_date ?? item.date)}`} />
+              <FactChip text={`${item.duration_hours}h charged`} earning={earning} />
+            </>
+          ) : (
+            <>
+              <FactChip text={`${formatDate(item.date)} · ${item.start_time}`} />
+              <FactChip text={`${item.duration_hours}h`} earning={earning} />
+            </>
+          )}
+          {detailText && <FactChip text={detailText} />}
+          {!isPastDue && item.is_overnight && <ModifierBadge kind="overnight" />}
+          {!isPastDue && timingFlexible && <ModifierBadge kind="flexible" />}
+          {!isPastDue && sentToYou && <ModifierBadge kind="sent" />}
+        </View>
 
-        {item.category === 'kid_sit' && item.category_details && (() => {
-          const d = item.category_details as { location?: string };
-          if (!d.location) return null;
-          return <Text style={styles.catDetailText}>{d.location === 'kids_house' ? "🏠 At the kid's house" : "🏡 At the sitter's house"}</Text>;
-        })()}
-        {item.category === 'dog' && item.category_details && (() => {
-          const d = item.category_details as { pet_name?: string; dog_name?: string; dog_task?: string };
-          const name = d.pet_name ?? d.dog_name;
-          const taskLabel = d.dog_task === 'walk' ? '🦮 Walking' : d.dog_task === 'house_check' ? '🏠 House check' : '🏡 Boarding';
-          return <Text style={styles.catDetailText}>{taskLabel}{name ? ` · ${name}` : ''}</Text>;
-        })()}
-        {item.category === 'manual_labor' && item.category_details && (() => {
-          const d = item.category_details as { labor_description?: string };
-          return d.labor_description ? <Text style={styles.catDetailText}>"{d.labor_description}"</Text> : null;
-        })()}
-        {item.category === 'professional' && item.category_details && (() => {
-          const d = item.category_details as { service_type?: string };
-          return d.service_type ? <Text style={styles.catDetailText}>{d.service_type}</Text> : null;
-        })()}
-        {item.category === 'cooking' && item.category_details && (() => {
-          const d = item.category_details as { cooking_type?: string };
-          return d.cooking_type ? <Text style={styles.catDetailText}>{d.cooking_type}</Text> : null;
-        })()}
-        {item.category === 'elder_care' && item.category_details && (() => {
-          const d = item.category_details as { elder_care_type?: string };
-          return d.elder_care_type ? <Text style={styles.catDetailText}>{d.elder_care_type}</Text> : null;
-        })()}
-        {item.category === 'physical_training' && item.category_details && (() => {
-          const d = item.category_details as { training_type?: string };
-          return d.training_type ? <Text style={styles.catDetailText}>{d.training_type}</Text> : null;
-        })()}
-        {item.category === 'errands' && item.category_details && (() => {
-          const d = item.category_details as { errand_type?: string };
-          return d.errand_type ? <Text style={styles.catDetailText}>{d.errand_type}</Text> : null;
-        })()}
-
-        {item.is_overnight ? (
-          <View style={styles.cardMeta}>
-            <Text style={styles.metaText}>📥 Drop-off: {formatDate(item.date)} at {item.start_time}</Text>
-            {item.end_date && <Text style={styles.metaText}>📤 Pick-up: {formatDate(item.end_date)} at {item.end_time}</Text>}
-            <Text style={styles.metaText}>⭐ {item.duration_hours}h charged</Text>
-          </View>
-        ) : item.category === 'manual_labor' ? (() => {
-          const d = item.category_details as { actual_hours?: number } | null;
-          const actualH = d?.actual_hours ?? item.duration_hours / 2;
-          return (
-            <View style={styles.cardMeta}>
-              <Text style={styles.metaText}>📅 {formatDate(item.date)}</Text>
-              <Text style={styles.metaText}>🕐 {item.start_time}</Text>
-              <Text style={styles.metaText}>⏱ {actualH}h work · {item.duration_hours}h charged</Text>
-            </View>
-          );
-        })() : (
-          <View style={styles.cardMeta}>
-            <Text style={styles.metaText}>📅 {formatDate(item.date)}</Text>
-            <Text style={styles.metaText}>🕐 {item.start_time}</Text>
-            <Text style={styles.metaText}>⏱ {item.duration_hours}h</Text>
-          </View>
-        )}
-
-        {item.is_overnight && <View style={styles.overnightBadge}><Text style={styles.overnightBadgeText}>🌙 Overnight</Text></View>}
-        {(item.category_details as { timing_flexible?: boolean } | null)?.timing_flexible && (
-          <View style={styles.flexibleBadge}><Text style={styles.flexibleBadgeText}>⏰ Flexible timing</Text></View>
-        )}
         {item.notes ? <Text style={styles.cardNotes}>{item.notes}</Text> : null}
 
         {showContact && (
-          <View style={styles.contactBox}>
-            <Text style={styles.contactTitle}>
-              {isOwn ? (hasOffer && !isConfirmed ? '🙋 Offered by' : '👤 Your helper') : '👨‍👩‍👧 Family'}
+          <View style={styles.contactLine2}>
+            <Text style={styles.contactLine2Text}>
+              {isOwn ? (hasOffer && !isConfirmed ? '🙋 Offered by' : '👤 Helper:') : '👨‍👩‍👧 Family:'} <Text style={styles.contactLine2Name}>{contactFamily!.name}</Text>
             </Text>
-            <Text style={styles.contactName}>{contactFamily!.name}</Text>
-            {contactFamily!.parent1_name && <Text style={styles.contactLine}>👤 {contactFamily!.parent1_name}</Text>}
-            {(contactFamily!.parent1_phone || contactFamily!.phone) && (
-              <Text style={styles.contactLine}>📞 {contactFamily!.parent1_phone || contactFamily!.phone}</Text>
-            )}
-            <Text style={styles.contactLine}>✉️ {contactFamily!.email}</Text>
-            {contactFamily!.address && <Text style={styles.contactLine}>🏠 {contactFamily!.address}</Text>}
           </View>
         )}
-
         {/* ── Actions ── */}
         <View style={styles.cardActions}>
           {item.status === 'open' && !isOwn && (
-            <TouchableOpacity style={[styles.offerBtn, item.category === 'manual_labor' && { backgroundColor: colors.amber }]} onPress={() => offerRequest(item)}>
-              <Text style={styles.offerBtnText}>
-                {item.category === 'manual_labor' ? `Offer to help — Earn ${item.duration_hours}h (2×) 🔨`
-                  : item.category === 'dog' ? `Offer to help — Earn ${item.duration_hours}h 🐕`
-                  : item.category === 'professional' ? `Offer to help — Earn ${item.duration_hours}h 🎓`
-                  : item.category === 'cooking' ? `Offer to help — Earn ${item.duration_hours}h 🍳`
-                  : `Offer to help — Earn ${item.duration_hours}h ⭐`}
-              </Text>
-            </TouchableOpacity>
+            <View style={styles.primaryActionRow}>
+              <TouchableOpacity style={[buttonStyles.earn.container, styles.primaryActionBtn]} onPress={() => offerRequest(item)}>
+                <Text style={buttonStyles.earn.text}>Offer to help</Text>
+              </TouchableOpacity>
+              <View style={styles.amountStack}>
+                <View style={styles.amountRow}>
+                  <MaterialIcons name="call-received" size={14} color={colors.sageDark} />
+                  <Text style={[styles.amountText, { color: colors.sageDark }]}>+{item.duration_hours}h</Text>
+                </View>
+                <Text style={styles.amountCaption}>you earn</Text>
+              </View>
+            </View>
           )}
           {item.status === 'open' && isOwn && (
             <View style={styles.openOwnActions}>
-              <TouchableOpacity style={styles.editBtn} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: item.id } })}>
-                <Text style={styles.editBtnText}>Edit</Text>
+              <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: item.id } })}>
+                <Text style={buttonStyles.secondary.text}>Edit</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => cancelRequest(item)}>
-                <Text style={styles.cancelBtnText}>Cancel Request</Text>
+              <TouchableOpacity style={buttonStyles.destructive.container} onPress={() => cancelRequest(item)}>
+                <Text style={buttonStyles.destructive.text}>Cancel Request</Text>
               </TouchableOpacity>
             </View>
           )}
           {item.status === 'offered' && isOwn && (
             <View style={styles.offeredActions}>
               <Text style={styles.offeredPrompt}>{item.fulfilling_family?.name} wants to help — approve to confirm!</Text>
-              <TouchableOpacity style={styles.approveBtn} onPress={() => approveOffer(item)}>
-                <Text style={styles.approveBtnText}>Approve ✓</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.declineBtn} onPress={() => declineOffer(item)}>
-                <Text style={styles.declineBtnText}>Decline offer</Text>
+              <View style={styles.primaryActionRow}>
+                <TouchableOpacity style={[buttonStyles.spend.container, styles.primaryActionBtn]} onPress={() => approveOffer(item)}>
+                  <Text style={buttonStyles.spend.text}>Approve</Text>
+                </TouchableOpacity>
+                <View style={styles.amountStack}>
+                  <View style={styles.amountRow}>
+                    <MaterialIcons name="call-made" size={14} color={colors.primaryDark} />
+                    <Text style={[styles.amountText, { color: colors.primaryDark }]}>-{item.duration_hours}h</Text>
+                  </View>
+                  <Text style={styles.amountCaption}>you'd pay</Text>
+                </View>
+              </View>
+              <TouchableOpacity style={buttonStyles.destructive.container} onPress={() => declineOffer(item)}>
+                <Text style={buttonStyles.destructive.text}>Decline offer</Text>
               </TouchableOpacity>
             </View>
           )}
           {item.status === 'offered' && isFulfiller && (
-            <TouchableOpacity style={styles.withdrawBtn} onPress={() => withdrawOffer(item)}>
-              <Text style={styles.withdrawBtnText}>Withdraw my offer</Text>
+            <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => withdrawOffer(item)}>
+              <Text style={buttonStyles.secondary.text}>Withdraw my offer</Text>
             </TouchableOpacity>
           )}
           {item.status === 'offered' && !isOwn && !isFulfiller && (
@@ -489,9 +471,9 @@ export default function RequestsScreen() {
   };
 
   const statusFilters: { key: Filter; label: string }[] = [
-    { key: 'open',     label: 'Village Requests' },
-    { key: 'mine',     label: 'My Requests' },
-    { key: 'upcoming', label: 'My Scheduled Requests' },
+    { key: 'open',     label: 'Village' },
+    { key: 'mine',     label: 'Mine' },
+    { key: 'upcoming', label: 'Scheduled' },
   ];
 
   return (
@@ -499,37 +481,19 @@ export default function RequestsScreen() {
       <View style={styles.headerRow}>
         <Text style={styles.title}>Requests</Text>
         <TouchableOpacity style={styles.newBtn} onPress={() => router.push('/new-request')}>
-          <Text style={styles.newBtnText}>+ New Request</Text>
+          <Text style={styles.newBtnText}>+ New</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Category filter */}
-      <View style={styles.catRow}>
-        <TouchableOpacity style={[styles.catChip, catFilter === 'all' && styles.catChipActive]} onPress={() => { setCatFilter('all'); setLoading(true); }}>
-          <Text style={[styles.catChipText, catFilter === 'all' && styles.catChipTextActive]}>All</Text>
-        </TouchableOpacity>
-        {ALL_CATEGORIES.map(c => (
-          <TouchableOpacity key={c.key} style={[styles.catChip, catFilter === c.key && styles.catChipActive]} onPress={() => { setCatFilter(c.key); setLoading(true); }}>
-            <Text style={[styles.catChipText, catFilter === c.key && styles.catChipTextActive]}>{c.emoji} {c.label}</Text>
+      {/* Status filter — segmented, matching the Village tab */}
+      <View style={styles.tabBar}>
+        {statusFilters.map((f) => (
+          <TouchableOpacity key={f.key} style={[styles.tabBtn, filter === f.key && styles.tabBtnActive]} onPress={() => { setFilter(f.key); setLoading(true); }}>
+            <Text style={[styles.tabText, filter === f.key && styles.tabTextActive]}>{f.label}</Text>
           </TouchableOpacity>
         ))}
       </View>
 
-      {/* Status filter */}
-      <View style={styles.filtersRow}>
-        {statusFilters.map((f) => {
-          const words = f.label.split(' ');
-          return (
-            <TouchableOpacity key={f.key} style={[styles.filterTab, filter === f.key && styles.filterTabActive]} onPress={() => { setFilter(f.key); setLoading(true); }}>
-              {words.length > 1 ? words.map((w, i) => (
-                <Text key={i} style={[styles.filterText, filter === f.key && styles.filterTextActive]}>{w}</Text>
-              )) : (
-                <Text style={[styles.filterText, filter === f.key && styles.filterTextActive]}>{f.label}</Text>
-              )}
-            </TouchableOpacity>
-          );
-        })}
-      </View>
 
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
@@ -562,65 +526,52 @@ const styles = StyleSheet.create({
   newBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 
   // Category filter
-  catRow: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 20, gap: 6, marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  catChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.borderLight },
-  catChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  catChipText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
-  catChipTextActive: { color: '#fff' },
 
-  // Status filter
-  filtersRow: { flexDirection: 'row', paddingHorizontal: 20, gap: 8, marginBottom: 10, marginTop: 2 },
-  filterTab: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 8, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border },
-  filterTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  filterText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
-  filterTextActive: { color: '#fff' },
+  // Status filter — segmented, matching Village's tabBar
+  tabBar: {
+    flexDirection: 'row', marginHorizontal: 20, marginBottom: 12,
+    backgroundColor: colors.card, borderRadius: 14,
+    borderWidth: 1.5, borderColor: colors.border, padding: 4,
+  },
+  tabBtn: { flex: 1, paddingVertical: 9, borderRadius: 10, alignItems: 'center' },
+  tabBtnActive: { backgroundColor: colors.primary },
+  tabText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+  tabTextActive: { color: '#fff', fontWeight: '700' },
 
   list: { paddingHorizontal: 20, paddingBottom: 32 },
-  card: { backgroundColor: colors.card, borderRadius: 18, padding: 16, marginBottom: 12, borderWidth: 1.5, borderColor: colors.borderLight, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
+  card: { backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 10, borderWidth: 1.5, borderColor: colors.borderLight, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   cardPastDue: { opacity: 0.55, borderColor: colors.red + '60', shadowOpacity: 0 },
   cardUrgent: { borderColor: colors.red, borderWidth: 2 },
-  urgentBanner: { backgroundColor: colors.red, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, alignSelf: 'flex-start', marginBottom: 6 },
-  urgentBannerText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 },
-  cardTitle: { fontSize: 16, fontWeight: '700', color: colors.text, flex: 1, marginRight: 8 },
+  topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
+  topLeftPills: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, flex: 1 },
+  avatarSquare: { width: 40, height: 40, borderRadius: 12, backgroundColor: colors.sageLight, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+  avatarEmoji: { fontSize: 20 },
+  cardTitle: { fontSize: 16, fontWeight: '700', color: colors.text, marginBottom: 3 },
   cardTitlePastDue: { color: colors.textMuted },
   badge: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 8 },
   badgeText: { fontSize: 12, fontWeight: '700' },
   pastDueBadge: { backgroundColor: colors.redLight },
   pastDueBadgeText: { color: colors.red },
-  cardFamily: { fontSize: 13, color: colors.textSecondary, marginBottom: 8, fontWeight: '500' },
-  cardMeta: { flexDirection: 'row', gap: 12, marginBottom: 8, flexWrap: 'wrap' },
-  metaText: { fontSize: 13, color: colors.text, fontWeight: '500' },
+  cardFamily: { fontSize: 13, color: colors.textSecondary, marginBottom: 10, fontWeight: '500' },
+  factRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 },
+  factChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.background, borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5, borderWidth: 1, borderColor: colors.borderLight },
+  factChipText: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.3 },
   cardNotes: { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginBottom: 8 },
-  catBadge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
-  catBadgeText: { fontSize: 12, fontWeight: '700' },
-  catDetailText: { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginBottom: 6 },
-  overnightBadge: { backgroundColor: colors.purpleLight, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
-  overnightBadgeText: { color: colors.purple, fontSize: 12, fontWeight: '700' },
-  flexibleBadge: { backgroundColor: colors.sageLight, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
-  flexibleBadgeText: { color: colors.sageDark, fontSize: 12, fontWeight: '700' },
-  contactBox: { backgroundColor: colors.sageLight, borderRadius: 12, padding: 12, marginVertical: 8, borderWidth: 1, borderColor: colors.sage + '40' },
-  contactTitle: { fontSize: 11, fontWeight: '700', color: colors.sageDark, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 },
-  contactName: { fontSize: 15, fontWeight: '700', color: colors.text, marginBottom: 4 },
-  contactLine: { fontSize: 13, color: colors.text, fontWeight: '500', marginBottom: 2 },
+  primaryActionRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  primaryActionBtn: { flex: 1 },
+  amountStack: { alignItems: 'flex-end' },
+  amountRow: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  amountText: { fontSize: 17, fontWeight: '800' },
+  amountCaption: { fontSize: 11, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 },
+  contactLine2: { marginVertical: 4 },
+  contactLine2Text: { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
+  contactLine2Name: { color: colors.text, fontWeight: '700' },
   cardActions: { marginTop: 6 },
 
   // Action buttons
-  offerBtn: { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 12, alignItems: 'center', shadowColor: colors.primary, shadowOpacity: 0.2, shadowRadius: 6, elevation: 2 },
-  offerBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   openOwnActions: { gap: 8 },
-  editBtn: { borderWidth: 1.5, borderColor: colors.border, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
-  editBtnText: { color: colors.text, fontWeight: '700', fontSize: 14 },
-  cancelBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
-  cancelBtnText: { color: colors.red, fontWeight: '700', fontSize: 14 },
   offeredActions: { gap: 8 },
   offeredPrompt: { fontSize: 13, color: colors.text, fontWeight: '600', marginBottom: 4, textAlign: 'center' },
-  approveBtn: { backgroundColor: colors.green, borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
-  approveBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
-  declineBtn: { borderWidth: 1.5, borderColor: colors.red + '60', borderRadius: 12, paddingVertical: 11, alignItems: 'center' },
-  declineBtnText: { color: colors.red, fontWeight: '600', fontSize: 13 },
-  withdrawBtn: { borderWidth: 1.5, borderColor: colors.border, borderRadius: 12, paddingVertical: 11, alignItems: 'center' },
-  withdrawBtnText: { color: colors.textSecondary, fontWeight: '600', fontSize: 13 },
   offeredElsewhere: { backgroundColor: colors.borderLight, borderRadius: 10, paddingVertical: 10, alignItems: 'center' },
   offeredElsewhereText: { fontSize: 13, color: colors.textMuted, fontWeight: '500' },
   acceptedActions: { gap: 8 },

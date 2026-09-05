@@ -15,6 +15,7 @@ import { getFamilyAnimal, ANIMALS } from '../../lib/animals';
 import { calcAge } from '../../lib/utils';
 import { pickAndUploadAvatar, removeAvatar } from '../../lib/photos';
 import { notifyFamily } from '../../lib/notifications';
+import { OnboardingIntro } from '../../components/OnboardingIntro';
 import type { KidEntry, PetEntry, Block, Partnership, Family } from '../../types';
 
 const PET_SIZES = ['Small', 'Medium', 'Large'] as const;
@@ -43,6 +44,7 @@ export default function ProfileScreen() {
   const [partner, setPartner] = useState<Family | null>(null);
   const [unlinking, setUnlinking] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [showIntro, setShowIntro] = useState(false);
 
   async function handleChangePhoto() {
     if (!family) return;
@@ -157,7 +159,7 @@ export default function ProfileScreen() {
     setGeneratingInvite(false);
     if (error) return Alert.alert('Error', error.message);
     await Share.share({
-      message: `Join me on VillageMates, the babysitting exchange app!\n\nUse this code to create your account: ${code}\n\nOn the sign-up screen, tap "Joining my partner's account" and enter this code.`,
+      message: `Join me on VillageMates, a neighbor network for trading help — sitting, errands, meals, and more!\n\nUse this code to create your account: ${code}\n\nOn the sign-up screen, tap "Joining my partner's account" and enter this code.`,
     });
   }
 
@@ -227,6 +229,8 @@ export default function ProfileScreen() {
   }
 
   return (
+    <>
+    <OnboardingIntro visible={showIntro} onDone={() => setShowIntro(false)} />
     <SafeAreaView style={styles.container} edges={['top']}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
@@ -550,6 +554,10 @@ export default function ProfileScreen() {
             </>
           )}
 
+          <TouchableOpacity style={styles.historyBtn} onPress={() => setShowIntro(true)}>
+            <Text style={styles.historyBtnText}>How VillageMates Works</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.historyBtn} onPress={() => router.push('/history')}>
             <Text style={styles.historyBtnText}>View Hour History</Text>
           </TouchableOpacity>
@@ -576,6 +584,7 @@ export default function ProfileScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
+    </>
   );
 }
 

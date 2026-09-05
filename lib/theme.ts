@@ -42,3 +42,16 @@ export const fonts = {
   bold: 'Inter_700Bold',
   extraBold: 'Inter_800ExtraBold',
 };
+
+// Six button roles, 48px minimum target. "Spend" and "earn" are both
+// primary actions — which one applies depends on whether the tap moves
+// hours out of or into the tapper's balance — everything else is a
+// secondary/ghost/destructive/disabled variant shared across both.
+export const buttonStyles = {
+  spend: { container: { minHeight: 48, borderRadius: 12, alignItems: 'center' as const, justifyContent: 'center' as const, backgroundColor: colors.primary }, text: { color: '#fff', fontWeight: '700' as const, fontSize: 15 } },
+  earn: { container: { minHeight: 48, borderRadius: 12, alignItems: 'center' as const, justifyContent: 'center' as const, backgroundColor: colors.sage }, text: { color: '#fff', fontWeight: '700' as const, fontSize: 15 } },
+  secondary: { container: { minHeight: 48, borderRadius: 12, alignItems: 'center' as const, justifyContent: 'center' as const, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.card }, text: { color: colors.text, fontWeight: '700' as const, fontSize: 15 } },
+  ghost: { container: { minHeight: 48, borderRadius: 12, alignItems: 'center' as const, justifyContent: 'center' as const }, text: { color: colors.textSecondary, fontWeight: '700' as const, fontSize: 15 } },
+  destructive: { container: { minHeight: 48, borderRadius: 12, alignItems: 'center' as const, justifyContent: 'center' as const, borderWidth: 1.5, borderColor: colors.red + '60' }, text: { color: colors.red, fontWeight: '700' as const, fontSize: 15 } },
+  disabled: { container: { minHeight: 48, borderRadius: 12, alignItems: 'center' as const, justifyContent: 'center' as const, backgroundColor: colors.borderLight }, text: { color: colors.textMuted, fontWeight: '700' as const, fontSize: 15 } },
+};
