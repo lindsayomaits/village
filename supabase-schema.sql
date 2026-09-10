@@ -3403,6 +3403,24 @@ $$;
 grant execute on function nudge_connection(uuid, uuid) to authenticated;
 
 -- ============================================================
+-- 89. Realtime: the app subscribes to these new tables the same way it
+--     already does for messages/requests/etc. They must be in the
+--     supabase_realtime publication or those .on('postgres_changes')
+--     listeners silently never fire. Guarded so re-running is a no-op.
+-- ============================================================
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table notifications;
+  exception when others then null;
+  end;
+  begin
+    alter publication supabase_realtime add table request_comments;
+  exception when others then null;
+  end;
+end $$;
+
+-- ============================================================
 -- SEED: create the admin household
 -- After running this schema, sign up via the app with:
 --   email: lindsayomaits@gmail.com
