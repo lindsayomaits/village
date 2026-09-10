@@ -6,6 +6,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import type * as NotificationsType from 'expo-notifications';
 import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -74,8 +75,10 @@ export default function RootLayout() {
   if (!fontsLoaded) return null;
 
   return (
-    <AuthProvider>
-      <RootLayoutNav />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <RootLayoutNav />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

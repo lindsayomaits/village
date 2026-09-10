@@ -91,12 +91,15 @@ export default function DMScreen() {
   }
 
   async function loadOpenRequests() {
+    // Only live requests are worth tagging with #, and this list is fed to
+    // a regex builder on every message render — keep it small.
     const { data } = await supabase
       .from('requests')
       .select('*')
       .eq('post_type', 'request')
+      .in('status', ['open', 'offered', 'accepted'])
       .order('created_at', { ascending: false })
-      .limit(200);
+      .limit(50);
     setOpenRequests(data ?? []);
   }
 
@@ -139,7 +142,8 @@ export default function DMScreen() {
       .from('direct_messages')
       .select('*, reactions:dm_reactions(*)')
       .or(`and(from_family_id.eq.${family.id},to_family_id.eq.${otherId}),and(from_family_id.eq.${otherId},to_family_id.eq.${family.id})`)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(100);
     setMessages(data ?? []);
   }
 

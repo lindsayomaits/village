@@ -25,15 +25,40 @@ export type Family = {
   discoverable: boolean;
   photo_url: string | null;
   push_token: string | null;
-  phone: string | null;
-  kids_info: string | null;
   animal: string | null;
-  village_notifications: 'all' | 'mentions' | 'muted' | null;
   services_offered: string[] | null;
   parent1_name: string | null;
   parent1_phone: string | null;
   address: string | null;
   emergency_contact: string | null;
+  created_at: string;
+};
+
+export type AppNotification = {
+  id: string;
+  family_id: string;
+  title: string;
+  body: string;
+  path: string | null;
+  read_at: string | null;
+  created_at: string;
+};
+
+export type RequestComment = {
+  id: string;
+  request_id: string;
+  family_id: string;
+  family?: Family;
+  body: string;
+  created_at: string;
+};
+
+export type Vouch = {
+  id: string;
+  voucher_id: string;
+  voucher?: Family;
+  vouched_id: string;
+  note: string | null;
   created_at: string;
 };
 

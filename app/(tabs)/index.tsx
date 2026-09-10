@@ -1,8 +1,9 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   View, StyleSheet, ScrollView, TouchableOpacity, Image,
-  RefreshControl, ActivityIndicator, Alert,
+  RefreshControl, ActivityIndicator,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -12,11 +13,12 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import { getPendingBreakdown } from '../../lib/hours';
+import { useUnreadNotifications } from '../../lib/useUnreadNotifications';
 import { StatusBadge } from '../../components/StatusBadge';
 import { HourBalanceCard } from '../../components/HourBalanceCard';
 import { OnboardingIntro } from '../../components/OnboardingIntro';
 import { HomeItemRow } from '../../components/HomeItemRow';
-import type { Request, RequestCategory } from '../../types';
+import type { Request } from '../../types';
 
 
 export default function HomeScreen() {
@@ -29,62 +31,23 @@ export default function HomeScreen() {
   const [pendingOutgoingCount, setPendingOutgoingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [onboardingSeen, setOnboardingSeen] = useState(true);
   const [showIntro, setShowIntro] = useState(false);
-  const alertedConnectionIds = useRef<Set<string>>(new Set());
+  const { count: unreadNotifications } = useUnreadNotifications(family?.id);
 
-  // The onboarding banner is meant for a brand-new user's first visit —
-  // once they've seen the home screen once, it stops reappearing even if
-  // they never finished filling in their profile. The same "haven't seen
-  // Home before" moment is also the right time to show the two-screen
-  // intro (what the app is, how hours work) — same check, same key.
+  // The two-screen intro (what the app is, how hours work) shows once, the
+  // first time this family reaches Home. The "finish your profile" banner
+  // below is separate — it keeps showing until the profile is actually
+  // filled in, rather than vanishing after this one moment.
   useEffect(() => {
     if (!family?.id) return;
     const key = `onboarding_seen_${family.id}`;
     AsyncStorage.getItem(key).then(seen => {
-      if (seen) {
-        setOnboardingSeen(true);
-      } else {
-        setOnboardingSeen(false);
+      if (!seen) {
         setShowIntro(true);
         AsyncStorage.setItem(key, 'true');
       }
     });
   }, [family?.id]);
-
-  async function checkPendingConnections() {
-    if (!family) return;
-    const { data } = await supabase
-      .from('connections')
-      .select('id, requester_id, requester:families!requester_id(name)')
-      .eq('status', 'pending')
-      .eq('recipient_id', family.id);
-
-    const fresh = (data ?? []).filter(c => !alertedConnectionIds.current.has(c.id));
-    if (fresh.length === 0) return;
-    fresh.forEach(c => alertedConnectionIds.current.add(c.id));
-
-    if (fresh.length === 1) {
-      const requesterName = (fresh[0].requester as unknown as { name: string } | null)?.name ?? 'Someone';
-      Alert.alert(
-        'New connection request',
-        `${requesterName} wants to connect with you.`,
-        [
-          { text: 'Later', style: 'cancel' },
-          { text: 'Review', onPress: () => router.push({ pathname: '/(tabs)/members', params: { tab: 'pending' } }) },
-        ]
-      );
-    } else {
-      Alert.alert(
-        'New connection requests',
-        `${fresh.length} people want to connect with you.`,
-        [
-          { text: 'Later', style: 'cancel' },
-          { text: 'Review', onPress: () => router.push({ pathname: '/(tabs)/members', params: { tab: 'pending' } }) },
-        ]
-      );
-    }
-  }
 
   async function loadData() {
     // No date filter here — an open or pending request whose date already
@@ -112,7 +75,6 @@ export default function HomeScreen() {
 
   useFocusEffect(useCallback(() => {
     loadData();
-    checkPendingConnections();
     // Balance can change from outside this screen (admin adjustment,
     // settlement, a gift) — refetch the auth family on every focus so the
     // hour bank doesn't show a stale number until a manual pull-to-refresh.
@@ -143,7 +105,7 @@ export default function HomeScreen() {
       .map(r => [r.id, r])
   ).values());
 
-  const isNewUser = (!family?.parent1_name || !family?.parent1_phone) && !onboardingSeen;
+  const isNewUser = !family?.parent1_name || !family?.parent1_phone;
 
   function formatDate(dateStr: string) {
     const d = new Date(dateStr + 'T00:00:00');
@@ -177,6 +139,19 @@ export default function HomeScreen() {
               <Text style={styles.subGreeting}>VillageMates</Text>
             </View>
           </View>
+          <TouchableOpacity
+            style={styles.bellBtn}
+            onPress={() => router.push('/notifications')}
+            accessibilityRole="button"
+            accessibilityLabel={unreadNotifications > 0 ? `Notifications, ${unreadNotifications} unread` : 'Notifications'}
+          >
+            <Ionicons name="notifications-outline" size={24} color={colors.text} />
+            {unreadNotifications > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unreadNotifications > 9 ? '9+' : unreadNotifications}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
         </View>
 
         {/* Onboarding banner — only for new users */}
@@ -321,6 +296,12 @@ const styles = StyleSheet.create({
   headerLogo: { width: 38, height: 38, borderRadius: 9 },
   greeting: { fontSize: 22, fontWeight: '800', color: colors.text },
   subGreeting: { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
+  bellBtn: { padding: 6 },
+  bellBadge: {
+    position: 'absolute', top: 0, right: 0, minWidth: 16, height: 16, borderRadius: 8,
+    backgroundColor: colors.red, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3,
+  },
+  bellBadgeText: { color: '#fff', fontSize: 10, fontWeight: '800' },
 
   onboardingCard: {
     backgroundColor: colors.primaryLight, borderRadius: 20, padding: 20,
@@ -335,27 +316,6 @@ const styles = StyleSheet.create({
     shadowColor: colors.primary, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 3,
   },
   onboardingBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
-
-  balanceCard: {
-    borderRadius: 24, marginBottom: 16,
-    shadowColor: colors.sageDark, shadowOpacity: 0.35, shadowRadius: 16, shadowOffset: { width: 0, height: 6 },
-    elevation: 6,
-  },
-  balanceCardInner: { padding: 26 },
-  balanceLabel: { fontSize: 13, color: 'rgba(255,255,255,0.75)', fontWeight: '600', marginBottom: 4 },
-  balanceNumberRow: { flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
-  balanceNumber: { fontSize: 52, fontWeight: '800', flexShrink: 1 },
-  balanceAvailableLabel: { fontSize: 15, fontWeight: '600', color: 'rgba(255,255,255,0.75)' },
-  balancePendingRows: { gap: 8, marginBottom: 12 },
-  balancePendingRow: { gap: 1 },
-  balancePendingLine: { fontSize: 14, color: 'rgba(255,255,255,0.92)', fontWeight: '700' },
-  balancePendingHint: { fontSize: 12, color: 'rgba(255,255,255,0.65)', fontWeight: '500' },
-  balanceSub: { fontSize: 13, color: 'rgba(255,255,255,0.7)', marginBottom: 18 },
-  balanceHistoryHint: { fontSize: 12, color: 'rgba(255,255,255,0.55)', fontWeight: '600', marginTop: 12, textAlign: 'right' },
-  progressBarBg: { height: 6, backgroundColor: 'rgba(255,255,255,0.25)', borderRadius: 3, overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.85)' },
-  progressLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
-  progressLabel: { fontSize: 11, color: 'rgba(255,255,255,0.6)', fontWeight: '500' },
 
   actions: { flexDirection: 'row', gap: 14, marginBottom: 28 },
   actionPrimary: {

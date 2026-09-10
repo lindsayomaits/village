@@ -20,7 +20,7 @@ export default function ForgotPasswordScreen() {
 
     const redirectTo = Platform.OS === 'web'
       ? new URL('/reset-password', window.location.origin).toString()
-      : 'babysitexchange://reset-password';
+      : 'villagemates://reset-password';
 
     const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
       redirectTo,

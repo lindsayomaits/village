@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { View, Modal, ScrollView, TouchableOpacity, TextInput, StyleSheet } from 'react-native';
+import { View, Modal, ScrollView, TouchableOpacity, TextInput, StyleSheet, Alert } from 'react-native';
 import { Text } from './Text';
 import { Avatar } from './Avatar';
 import { useRouter } from 'expo-router';
@@ -45,6 +45,9 @@ export function PersonProfileModal({
 
   const [conn, setConn] = useState<Connection | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [vouchCount, setVouchCount] = useState(0);
+  const [iVouched, setIVouched] = useState(false);
+  const [vouchLoading, setVouchLoading] = useState(false);
 
   const [giftOpen, setGiftOpen] = useState(false);
   const [giftHours, setGiftHours] = useState(1);
@@ -57,14 +60,44 @@ export function PersonProfileModal({
   const [reportSubmitting, setReportSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!family || !myHousehold) { setConn(null); return; }
+    if (!family || !myHousehold) { setConn(null); setVouchCount(0); setIVouched(false); return; }
     supabase
       .from('connections')
       .select('*')
       .or(`and(requester_id.eq.${myHousehold.id},recipient_id.eq.${family.id}),and(requester_id.eq.${family.id},recipient_id.eq.${myHousehold.id})`)
       .maybeSingle()
       .then(({ data }) => setConn(data as Connection | null));
+    supabase
+      .from('vouches')
+      .select('voucher_id', { count: 'exact' })
+      .eq('vouched_id', family.id)
+      .then(({ data, count }) => {
+        setVouchCount(count ?? 0);
+        setIVouched((data ?? []).some((v: { voucher_id: string }) => v.voucher_id === myHousehold.id));
+      });
   }, [family?.id, myHousehold?.id]);
+
+  async function toggleVouch() {
+    if (!family || !myHousehold) return;
+    setVouchLoading(true);
+    if (iVouched) {
+      const { error } = await supabase.from('vouches').delete()
+        .eq('voucher_id', myHousehold.id).eq('vouched_id', family.id);
+      setVouchLoading(false);
+      if (error) return Alert.alert('Error', error.message);
+      setIVouched(false);
+      setVouchCount(c => Math.max(0, c - 1));
+    } else {
+      const { error } = await supabase.from('vouches').insert({
+        voucher_id: myHousehold.id, vouched_id: family.id,
+      });
+      setVouchLoading(false);
+      if (error) return Alert.alert('Error', error.message);
+      setIVouched(true);
+      setVouchCount(c => c + 1);
+      notifyFamily(family.id, '🤝 Someone vouched for you', `${myHousehold.name} vouched for you — it shows on your profile`, { path: `/profile/${family.id}` }).catch(() => {});
+    }
+  }
 
   function close() {
     setGiftOpen(false);
@@ -179,6 +212,9 @@ export function PersonProfileModal({
             <ScrollView bounces={false} contentContainerStyle={styles.sheetContent}>
               <Avatar familyId={family.id} animal={family.animal} photoUrl={family.photo_url} size={80} style={{ marginTop: 8, marginBottom: 8 }} />
               <Text style={styles.sheetName}>{family.name}</Text>
+              {family.id !== myHousehold?.id && vouchCount > 0 && (
+                <Text style={styles.vouchCount}>🤝 Vouched for by {vouchCount} {vouchCount === 1 ? 'household' : 'households'}</Text>
+              )}
 
               {(family.parent1_name || family.parent1_phone) && (
                 <View style={styles.infoRow}>
@@ -208,7 +244,7 @@ export function PersonProfileModal({
                   <View style={{ flex: 1 }}>
                     <Text style={styles.infoValue}>{displayPetsData(family.pets_data)}</Text>
                     {family.pets_data.filter(p => p.notes?.trim()).map((p, i) => (
-                      <Text key={i} style={styles.careNoteText}>{p.name}: {renderKidsInfo(p.notes)}</Text>
+                      <Text key={i} style={styles.careNoteText}>{p.name}: {p.notes}</Text>
                     ))}
                   </View>
                 </View>
@@ -248,6 +284,9 @@ export function PersonProfileModal({
                       </TouchableOpacity>
                       <TouchableOpacity style={styles.giftBtn} onPress={() => setGiftOpen(true)}>
                         <Text style={styles.giftBtnText}>🎁 Gift Hours</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.giftBtn} onPress={toggleVouch} disabled={vouchLoading}>
+                        <Text style={styles.giftBtnText}>{iVouched ? '✓ You vouched — tap to remove' : '🤝 Vouch for them'}</Text>
                       </TouchableOpacity>
                     </>
                   )}
@@ -410,7 +449,8 @@ const styles = StyleSheet.create({
   },
   sheetContent: { paddingHorizontal: 24, paddingBottom: 44, alignItems: 'center' },
   sheetAnimal: { fontSize: 64, marginTop: 8, marginBottom: 8 },
-  sheetName: { fontSize: 22, fontWeight: '800', color: colors.text, marginBottom: 20, textAlign: 'center' },
+  sheetName: { fontSize: 22, fontWeight: '800', color: colors.text, marginBottom: 18, textAlign: 'center' },
+  vouchCount: { fontSize: 13, color: colors.sageDark, fontWeight: '700', marginTop: -10, marginBottom: 16, textAlign: 'center' },
 
   connectHint: { fontSize: 13, color: colors.textMuted, textAlign: 'center', marginBottom: 14, fontStyle: 'italic' },
   infoRow: { flexDirection: 'row', alignItems: 'flex-start', width: '100%', marginBottom: 14 },

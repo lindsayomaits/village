@@ -13,6 +13,8 @@ import { addRequestToCalendar, scheduleReminders } from '../../lib/calendarRemin
 import { StatusBadge } from '../../components/StatusBadge';
 import { DirectionTag } from '../../components/DirectionTag';
 import { ModifierBadge } from '../../components/ModifierBadge';
+import { RequestComments } from '../../components/RequestComments';
+import { NudgeModal } from '../../components/NudgeModal';
 import type { Request, RequestCategory } from '../../types';
 
 const CATEGORY_LABELS: Record<RequestCategory, { emoji: string; label: string }> = {
@@ -56,6 +58,7 @@ export default function RequestDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [reminderPickerVisible, setReminderPickerVisible] = useState(false);
+  const [nudgeVisible, setNudgeVisible] = useState(false);
 
   async function loadRequest() {
     if (!id) return;
@@ -325,8 +328,8 @@ export default function RequestDetailScreen() {
                 <Text style={styles.contactChevron}>›</Text>
               </View>
               {contactFamily.parent1_name && <Text style={styles.contactLine}>👤 {contactFamily.parent1_name}</Text>}
-              {(contactFamily.parent1_phone || contactFamily.phone) && (
-                <Text style={styles.contactLine}>📞 {contactFamily.parent1_phone || contactFamily.phone}</Text>
+              {contactFamily.parent1_phone && (
+                <Text style={styles.contactLine}>📞 {contactFamily.parent1_phone}</Text>
               )}
               <Text style={styles.contactLine}>✉️ {contactFamily.email}</Text>
               {contactFamily.address && <Text style={styles.contactLine}>🏠 {contactFamily.address}</Text>}
@@ -335,18 +338,21 @@ export default function RequestDetailScreen() {
           </View>
         )}
 
-        {/* Chat button */}
+        {/* Private DM to the other party */}
         {chatPartnerId && (
           <TouchableOpacity
             style={styles.chatBtn}
             onPress={() => router.push({
               pathname: '/dm/[familyId]',
-              params: { familyId: chatPartnerId, name: chatPartnerName ?? '', prefill: `Hi! Regarding #${req.title} ` },
+              params: { familyId: chatPartnerId, name: chatPartnerName ?? '' },
             })}
           >
-            <Text style={styles.chatBtnText}>💬 Chat with {chatPartnerName ?? 'them'} about this request</Text>
+            <Text style={styles.chatBtnText}>💬 Message {chatPartnerName ?? 'them'} privately</Text>
           </TouchableOpacity>
         )}
+
+        {/* Shared comment thread for this request */}
+        <RequestComments requestId={req.id} />
 
         {/* Both sides are locked in — offer to get it on their calendar or set a reminder */}
         {req.status === 'accepted' && (isOwn || isFulfiller) && (
@@ -375,6 +381,8 @@ export default function RequestDetailScreen() {
           }}
         />
 
+        <NudgeModal requestId={req.id} visible={nudgeVisible} onClose={() => setNudgeVisible(false)} />
+
         {/* Actions */}
         <View style={styles.actions}>
           {req.status === 'open' && !isOwn && (
@@ -384,6 +392,9 @@ export default function RequestDetailScreen() {
           )}
           {req.status === 'open' && isOwn && (
             <>
+              <TouchableOpacity style={buttonStyles.earn.container} onPress={() => setNudgeVisible(true)}>
+                <Text style={buttonStyles.earn.text}>👋 Nudge a connection</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: req.id } })}>
                 <Text style={buttonStyles.secondary.text}>Edit</Text>
               </TouchableOpacity>

@@ -26,6 +26,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [family, setFamily] = useState<Family | null>(null);
   const [loading, setLoading] = useState(true);
 
+  async function handleDeactivated() {
+    setFamily(null);
+    Alert.alert('Account removed', 'An admin has removed your profile from VillageMates.');
+    await supabase.auth.signOut();
+  }
+
   async function loadFamily(userId: string) {
     const { data } = await supabase
       .from('families')
@@ -34,14 +40,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .single();
 
     if (data && data.is_active === false) {
-      setFamily(null);
-      Alert.alert('Account removed', 'An admin has removed your profile from VillageMates.');
-      await supabase.auth.signOut();
+      await handleDeactivated();
       return;
     }
 
     setFamily(data ?? null);
-    if (data) registerForPushNotifications(data.id);
   }
 
   async function refreshFamily() {
@@ -57,9 +60,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const channel = supabase
       .channel(`family_self_${family.id}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'families', filter: `id=eq.${family.id}` },
-        (payload) => setFamily(payload.new as Family))
+        (payload) => {
+          const next = payload.new as Family;
+          // An admin can flip is_active off from another device — honour it
+          // immediately here too, not just on the next full loadFamily().
+          if (next.is_active === false) { handleDeactivated(); return; }
+          setFamily(next);
+        })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
+  }, [family?.id]);
+
+  // Register this device's push token once per signed-in family, not on
+  // every loadFamily()/refreshFamily() — the write (and its realtime echo)
+  // was firing on every screen focus.
+  useEffect(() => {
+    if (family?.id) registerForPushNotifications(family.id);
   }, [family?.id]);
 
   useEffect(() => {

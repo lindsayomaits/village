@@ -7,13 +7,14 @@ import { colors } from '../lib/theme';
 const FLOOR = -20;
 
 export function HourBalanceCard({
-  balance, pendingIncoming, pendingOutgoing, onPress,
+  balance, pendingIncoming, pendingOutgoing, pendingIncomingCount, pendingOutgoingCount, onPress,
 }: {
   balance: number; pendingIncoming: number; pendingOutgoing: number;
   pendingIncomingCount: number; pendingOutgoingCount: number; onPress: () => void;
 }) {
   const requestingPower = balance - FLOOR;
   const fillPct = Math.max(4, Math.min(100, (requestingPower / 40) * 100));
+  const commitmentLabel = (n: number) => `${n} ${n === 1 ? 'commitment' : 'commitments'}`;
 
   return (
     <LinearGradient colors={[colors.sage, colors.sageDark]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.card}>
@@ -33,14 +34,18 @@ export function HourBalanceCard({
             <MaterialIcons name="call-received" size={15} color="#fff" />
             <Text style={styles.pendingAmount}>+{pendingIncoming}h</Text>
           </View>
-          <Text style={styles.pendingCaption}>on the way</Text>
+          <Text style={styles.pendingCaption}>
+            on the way{pendingIncomingCount > 0 ? ` · ${commitmentLabel(pendingIncomingCount)}` : ''}
+          </Text>
         </View>
         <View style={styles.pendingBox}>
           <View style={styles.pendingHeader}>
             <MaterialIcons name="call-made" size={15} color="#fff" />
             <Text style={styles.pendingAmount}>-{pendingOutgoing}h</Text>
           </View>
-          <Text style={styles.pendingCaption}>if fulfilled</Text>
+          <Text style={styles.pendingCaption}>
+            if fulfilled{pendingOutgoingCount > 0 ? ` · ${commitmentLabel(pendingOutgoingCount)}` : ''}
+          </Text>
         </View>
       </View>
 

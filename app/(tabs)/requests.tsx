@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, ActivityIndicator, Alert, ScrollView,
+  RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Text } from '../../components/Text';
@@ -305,12 +305,13 @@ export default function RequestsScreen() {
   // especially important in "Scheduled," which mixes things you posted
   // with things you offered to help with.
   function roleLine(item: Request, isOwn: boolean, isFulfiller: boolean): string {
-    const requester = isOwn ? 'You' : (item.requesting_family?.name ?? 'Someone');
+    const cap = (s: string) => s ? s[0].toUpperCase() + s.slice(1) : s;
+    const requester = isOwn ? 'You' : (item.requesting_family?.name || 'Someone');
     if (item.status === 'open') return `${requester} requested · No helper yet`;
-    const fulfiller = isFulfiller ? 'you' : (item.fulfilling_family?.name ?? 'someone');
-    if (item.status === 'offered') return `${requester} requested · ${isFulfiller ? 'You' : fulfiller[0].toUpperCase() + fulfiller.slice(1)} offered to help`;
-    if (item.status === 'accepted') return `${requester} requested · ${isFulfiller ? 'You' : fulfiller[0].toUpperCase() + fulfiller.slice(1)} confirmed to help`;
-    if (item.status === 'completed') return `${requester} requested · ${isFulfiller ? 'You' : fulfiller[0].toUpperCase() + fulfiller.slice(1)} helped`;
+    const fulfiller = isFulfiller ? 'You' : cap(item.fulfilling_family?.name || 'someone');
+    if (item.status === 'offered') return `${requester} requested · ${fulfiller} offered to help`;
+    if (item.status === 'accepted') return `${requester} requested · ${fulfiller} confirmed to help`;
+    if (item.status === 'completed') return `${requester} requested · ${fulfiller} helped`;
     if (item.status === 'cancelled') return `${requester} requested · Cancelled`;
     return requester;
   }

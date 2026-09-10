@@ -245,7 +245,7 @@ export default function AdminScreen() {
             <Text style={styles.inputLabel}>Reason (optional)</Text>
             <TextInput
               style={styles.input}
-              placeholder="e.g. Correction for October sit"
+              placeholder="e.g. Correction for October booking"
               placeholderTextColor={colors.textMuted}
               value={adjustNote}
               onChangeText={setAdjustNote}

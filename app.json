@@ -1,13 +1,13 @@
 {
   "expo": {
     "name": "VillageMates",
-    "slug": "the-village-exchange",
+    "slug": "villagemates",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": false,
-    "scheme": "babysitexchange",
+    "scheme": "villagemates",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.babysitexchange.app",
+      "bundleIdentifier": "com.villagemates.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
@@ -23,9 +23,9 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#FDF8F3"
+        "backgroundColor": "#FAF7F2"
       },
-      "package": "com.VillageMates"
+      "package": "com.villagemates.app"
     },
     "web": {
       "favicon": "./assets/favicon.png",
@@ -44,7 +44,7 @@
       [
         "expo-calendar",
         {
-          "calendarPermission": "VillageMates uses your calendar to add sits you've scheduled."
+          "calendarPermission": "VillageMates uses your calendar to add help you've scheduled."
         }
       ],
       "@react-native-community/datetimepicker",

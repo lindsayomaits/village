@@ -11,12 +11,10 @@ import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
-import { formatPhone, renderKidsInfo, displayKidsData, displayPetsData } from '../../lib/utils';
-import { notifyFamily, notifyAdmins } from '../../lib/notifications';
+import { displayKidsData } from '../../lib/utils';
+import { notifyFamily } from '../../lib/notifications';
 import { PersonProfileModal } from '../../components/PersonProfileModal';
 import type { Family, Connection } from '../../types';
-
-const GIFT_HOUR_OPTIONS = [0.5, 1, 2, 3, 4, 5, 8, 10];
 
 type Tab = 'my_network' | 'find_people' | 'pending';
 

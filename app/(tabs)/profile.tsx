@@ -367,7 +367,7 @@ export default function ProfileScreen() {
                 style={[styles.input, styles.textArea]}
                 value={kid.notes ?? ''}
                 onChangeText={v => { setKids(prev => prev.map((k, j) => j === i ? { ...k, notes: v } : k)); setDirty(true); }}
-                placeholder="Allergies, bedtime, anything a sitter should know"
+                placeholder="Allergies, bedtime, anything a helper should know"
                 placeholderTextColor={colors.textMuted}
                 multiline numberOfLines={2} textAlignVertical="top"
               />
@@ -389,7 +389,7 @@ export default function ProfileScreen() {
           )}
 
           {pets.length > 0 && (
-            <Text style={styles.hint}>Add each pet so a sitter knows who they're looking after.</Text>
+            <Text style={styles.hint}>Add each pet so a helper knows who they're looking after.</Text>
           )}
 
           {pets.map((pet, i) => (
@@ -430,7 +430,7 @@ export default function ProfileScreen() {
                 style={[styles.input, styles.textArea]}
                 value={pet.notes ?? ''}
                 onChangeText={v => { setPets(prev => prev.map((p, j) => j === i ? { ...p, notes: v } : p)); setDirty(true); }}
-                placeholder="Feeding instructions, vet info, anything a sitter should know"
+                placeholder="Feeding instructions, vet info, anything a helper should know"
                 placeholderTextColor={colors.textMuted}
                 multiline numberOfLines={2} textAlignVertical="top"
               />

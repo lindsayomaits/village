@@ -7,7 +7,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { formatPhone, displayKidsData, displayPetsData, renderKidsInfo } from '../../lib/utils';
-import type { Family, RequestCategory } from '../../types';
+import type { Family, RequestCategory, Vouch } from '../../types';
 
 const CATEGORY_LABELS: Record<RequestCategory, { emoji: string; label: string }> = {
   kid_sit:           { emoji: '👧', label: 'Kid-sitting' },
@@ -24,6 +24,7 @@ export default function ProfileViewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [person, setPerson] = useState<Family | null>(null);
+  const [vouches, setVouches] = useState<Vouch[]>([]);
   const [loading, setLoading] = useState(true);
 
   useFocusEffect(useCallback(() => {
@@ -33,9 +34,15 @@ export default function ProfileViewScreen() {
       setPerson(data ?? null);
       setLoading(false);
     });
+    supabase
+      .from('vouches')
+      .select('*, voucher:families!voucher_id(id, name, animal, photo_url)')
+      .eq('vouched_id', id)
+      .order('created_at', { ascending: false })
+      .then(({ data }) => setVouches((data ?? []) as Vouch[]));
   }, [id]));
 
-  const phone = person ? (person.parent1_phone || person.phone) : null;
+  const phone = person?.parent1_phone ?? null;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -90,10 +97,29 @@ export default function ProfileViewScreen() {
               <Text style={styles.sectionLabel}>Pets</Text>
               <Text style={styles.line}>{displayPetsData(person.pets_data)}</Text>
               {person.pets_data.filter(p => p.notes?.trim()).map((p, i) => (
-                <Text key={i} style={styles.noteLine}>{p.name}: {renderKidsInfo(p.notes)}</Text>
+                <Text key={i} style={styles.noteLine}>{p.name}: {p.notes}</Text>
               ))}
             </View>
           )}
+
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>
+              Vouched for {vouches.length > 0 ? `· ${vouches.length}` : ''}
+            </Text>
+            {vouches.length === 0 ? (
+              <Text style={styles.emptyHint}>No vouches yet.</Text>
+            ) : (
+              vouches.map(v => (
+                <View key={v.id} style={styles.vouchRow}>
+                  <Avatar familyId={v.voucher_id} animal={v.voucher?.animal} photoUrl={v.voucher?.photo_url} size={28} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.line}>{v.voucher?.name ?? 'Someone'}</Text>
+                    {v.note ? <Text style={styles.noteLine}>"{v.note}"</Text> : null}
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
 
           {person.services_offered && person.services_offered.length > 0 && (
             <View style={styles.section}>
@@ -135,6 +161,7 @@ const styles = StyleSheet.create({
   linkLine: { color: colors.primary, fontWeight: '700' },
   noteLine: { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
   emptyHint: { fontSize: 13, color: colors.textMuted },
+  vouchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { backgroundColor: colors.sageLight, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.sage + '50' },
   chipText: { fontSize: 12, fontWeight: '600', color: colors.sageDark },
