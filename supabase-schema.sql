@@ -3114,6 +3114,127 @@ begin
 end;
 $$;
 
+-- Day-of settlement sweep — same as migration 78, plus an inbox row per
+-- notification so settled/paid events show up in notification history.
+create or replace function auto_settle_requests()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_from uuid;
+  v_to uuid;
+  v_earner_name text;
+  v_payer_name text;
+  v_push_from text;
+  v_push_to text;
+  v_messages jsonb := '[]'::jsonb;
+begin
+  for r in
+    select id, title, duration_hours, post_type, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and settled_at is null
+      and reversed_at is null
+      and fulfilling_family_id is not null
+      and coalesce(end_date, date) < current_date
+  loop
+    if r.post_type = 'request' then
+      v_from := r.requesting_family_id; v_to := r.fulfilling_family_id;
+    else
+      v_from := r.fulfilling_family_id; v_to := r.requesting_family_id;
+    end if;
+
+    perform settle_request(r.id);
+    update requests set status = 'completed' where id = r.id;
+
+    select name into v_earner_name from families where id = v_to;
+    select name into v_payer_name from families where id = v_from;
+    select push_token into v_push_from from families where id = v_from;
+    select push_token into v_push_to from families where id = v_to;
+
+    insert into notifications (family_id, title, body, path) values
+      (v_from, '✅ Hours settled',
+       format('We paid %s %sh for "%s". Didn''t happen? Open it to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+       format('/request/%s', r.id)),
+      (v_to, '💰 You got paid',
+       format('%sh from %s for "%s" just landed in your balance.', r.duration_hours, coalesce(v_payer_name, 'them'), r.title),
+       format('/request/%s', r.id));
+
+    if v_push_from like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_from, 'sound', 'default', 'title', '✅ Hours settled',
+        'body', format('We paid %s %sh for "%s". Didn''t happen? Tap here to reverse.', coalesce(v_earner_name, 'your helper'), r.duration_hours, r.title),
+        'data', jsonb_build_object('path', format('/request/%s', r.id)));
+    end if;
+    if v_push_to like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_to, 'sound', 'default', 'title', '💰 You got paid',
+        'body', format('%sh from %s for "%s" just landed in your balance.', r.duration_hours, coalesce(v_payer_name, 'them'), r.title),
+        'data', jsonb_build_object('path', format('/request/%s', r.id)));
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'), body := v_messages);
+  end if;
+end;
+$$;
+
+-- Day-before reminder for a confirmed booking — same as migration 74, plus
+-- inbox rows.
+create or replace function send_upcoming_sit_reminders()
+returns void language plpgsql security definer as $$
+declare
+  r record;
+  v_messages jsonb := '[]'::jsonb;
+  v_push_req text;
+  v_push_ful text;
+  v_other_name text;
+begin
+  for r in
+    select id, title, start_time, requesting_family_id, fulfilling_family_id
+    from requests
+    where status = 'accepted'
+      and sit_reminder_sent = false
+      and fulfilling_family_id is not null
+      and date = (current_date + 1)
+  loop
+    select name into v_other_name from families where id = r.fulfilling_family_id;
+    select push_token into v_push_req from families where id = r.requesting_family_id;
+    insert into notifications (family_id, title, body, path) values
+      (r.requesting_family_id, '📅 Tomorrow',
+       format('"%s" with %s is tomorrow at %s.', r.title, coalesce(v_other_name, 'your helper'), r.start_time),
+       format('/request/%s', r.id));
+    if v_push_req like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_req, 'sound', 'default', 'title', '📅 Tomorrow',
+        'body', format('"%s" with %s is tomorrow at %s.', r.title, coalesce(v_other_name, 'your helper'), r.start_time),
+        'data', jsonb_build_object('path', format('/request/%s', r.id)));
+    end if;
+
+    select name into v_other_name from families where id = r.requesting_family_id;
+    select push_token into v_push_ful from families where id = r.fulfilling_family_id;
+    insert into notifications (family_id, title, body, path) values
+      (r.fulfilling_family_id, '📅 Tomorrow',
+       format('"%s" for %s is tomorrow at %s.', r.title, coalesce(v_other_name, 'them'), r.start_time),
+       format('/request/%s', r.id));
+    if v_push_ful like 'ExponentPushToken%' then
+      v_messages := v_messages || jsonb_build_object(
+        'to', v_push_ful, 'sound', 'default', 'title', '📅 Tomorrow',
+        'body', format('"%s" for %s is tomorrow at %s.', r.title, coalesce(v_other_name, 'them'), r.start_time),
+        'data', jsonb_build_object('path', format('/request/%s', r.id)));
+    end if;
+
+    update requests set sit_reminder_sent = true where id = r.id;
+  end loop;
+
+  if jsonb_array_length(v_messages) > 0 then
+    perform net.http_post(url := 'https://exp.host/--/api/v2/push/send',
+      headers := jsonb_build_object('Content-Type', 'application/json'), body := v_messages);
+  end if;
+end;
+$$;
+
 -- ============================================================
 -- 86. Request comment threads. Replaces the "Chat about this request"
 --     DM-prefill hack with a thread anchored to the request itself,
