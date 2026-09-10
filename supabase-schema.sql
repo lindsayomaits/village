@@ -2906,7 +2906,9 @@ $$;
 --     both — nothing in the app reads hours_balance off the public view
 --     (own balance comes from the full `families` row via auth context),
 --     and is_admin was never needed here.
-create or replace view families_public as
+--     (CREATE OR REPLACE VIEW can't drop columns, so drop + recreate.)
+drop view if exists families_public;
+create view families_public as
   select id, name, animal, services_offered, created_at, discoverable, photo_url
   from families
   where is_active and (current_family_id() is not null or is_admin());
