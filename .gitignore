@@ -43,3 +43,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# scratch / non-code files
+/image.png
+assets/*.pdf
