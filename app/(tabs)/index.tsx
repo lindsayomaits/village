@@ -179,6 +179,8 @@ export default function HomeScreen() {
           pendingIncomingCount={pendingIncomingCount}
           pendingOutgoingCount={pendingOutgoingCount}
           onPress={() => router.push('/history')}
+          onPressIncoming={() => router.push('/(tabs)/requests?filter=upcoming')}
+          onPressOutgoing={() => router.push('/(tabs)/requests?filter=mine')}
         />
 
         {/* Quick actions */}
