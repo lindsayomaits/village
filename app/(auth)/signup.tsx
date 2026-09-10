@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   View, TextInput, TouchableOpacity, StyleSheet, Image,
-  KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView, Linking,
+  KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView,
 } from 'react-native';
 import { Link, useRouter } from 'expo-router';
 import { Text } from '../../components/Text';
@@ -10,9 +10,6 @@ import { colors } from '../../lib/theme';
 import { isValidEmail } from '../../lib/utils';
 
 type Mode = 'new_household' | 'partner';
-
-const PRIVACY_POLICY_URL = 'https://drive.google.com/file/d/1sKOcD82LDafk0ShAJgCIdiSZcMb3qstl/view?usp=sharing';
-const TERMS_OF_SERVICE_URL = 'https://drive.google.com/file/d/10OrWNiS7Z76iDmRn6PSs5mmfpLHnf53v/view?usp=sharing';
 
 export default function SignupScreen() {
   const router = useRouter();
@@ -190,9 +187,9 @@ export default function SignupScreen() {
           </View>
           <Text style={styles.termsText}>
             I agree to the{' '}
-            <Text style={styles.termsLink} onPress={() => Linking.openURL(TERMS_OF_SERVICE_URL)}>Terms & Conditions</Text>
+            <Text style={styles.termsLink} onPress={() => router.push('/legal/terms')}>Terms of Service</Text>
             {' '}and{' '}
-            <Text style={styles.termsLink} onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}>Privacy Policy</Text>
+            <Text style={styles.termsLink} onPress={() => router.push('/legal/privacy')}>Privacy Policy</Text>
           </Text>
         </TouchableOpacity>
 

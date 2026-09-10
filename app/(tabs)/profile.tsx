@@ -562,6 +562,14 @@ export default function ProfileScreen() {
             <Text style={styles.historyBtnText}>View Hour History</Text>
           </TouchableOpacity>
 
+          <TouchableOpacity style={styles.historyBtn} onPress={() => router.push('/legal/terms')}>
+            <Text style={styles.historyBtnText}>Terms of Service</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.historyBtn} onPress={() => router.push('/legal/privacy')}>
+            <Text style={styles.historyBtnText}>Privacy Policy</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={styles.signOutBtn}
             onPress={() => Alert.alert('Sign out?', undefined, [
