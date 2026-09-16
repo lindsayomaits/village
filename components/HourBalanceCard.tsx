@@ -4,8 +4,6 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { Text } from './Text';
 import { colors } from '../lib/theme';
 
-const FLOOR = -20;
-
 export function HourBalanceCard({
   balance, pendingIncoming, pendingOutgoing, pendingIncomingCount, pendingOutgoingCount,
   onPress, onPressIncoming, onPressOutgoing,
@@ -18,8 +16,6 @@ export function HourBalanceCard({
   onPressIncoming?: () => void;
   onPressOutgoing?: () => void;
 }) {
-  const requestingPower = balance - FLOOR;
-  const fillPct = Math.max(4, Math.min(100, (requestingPower / 40) * 100));
   const commitmentLabel = (n: number) => `${n} ${n === 1 ? 'commitment' : 'commitments'}`;
 
   const incomingCaption = `on the way${pendingIncomingCount > 0 ? ` · ${commitmentLabel(pendingIncomingCount)}` : ''}`;
@@ -69,14 +65,6 @@ export function HourBalanceCard({
           <Text style={styles.pendingCaption}>{outgoingCaption}</Text>
         </TouchableOpacity>
       </View>
-
-      <View style={styles.track}>
-        <View style={[styles.trackFill, { width: `${fillPct}%` }]} />
-      </View>
-      <View style={styles.trackLabels}>
-        <Text style={styles.trackLabel}>{FLOOR}h limit</Text>
-        <Text style={styles.trackLabel}>{requestingPower}h of requesting power</Text>
-      </View>
     </LinearGradient>
   );
 }
@@ -95,8 +83,4 @@ const styles = StyleSheet.create({
   pendingAmount: { fontSize: 17, fontWeight: '700', color: '#fff' },
   chevron: { marginLeft: 'auto' },
   pendingCaption: { fontSize: 12, fontWeight: '500', color: 'rgba(255,255,255,0.75)' },
-  track: { height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.2)', overflow: 'hidden' },
-  trackFill: { height: '100%', backgroundColor: '#fff', borderRadius: 3 },
-  trackLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
-  trackLabel: { fontSize: 12, fontWeight: '500', color: 'rgba(255,255,255,0.75)' },
 });

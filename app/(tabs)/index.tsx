@@ -128,6 +128,13 @@ export default function HomeScreen() {
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.sage} />}
       >
+        {/* Testing environment notice */}
+        <View style={styles.testBanner}>
+          <Text style={styles.testBannerText}>
+            🧪 Testing environment — requests here aren't real. Go ahead and test adding requests, accepting them, and messaging.
+          </Text>
+        </View>
+
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerBrandRow}>
@@ -292,6 +299,12 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   scroll: { paddingHorizontal: 20, paddingBottom: 32 },
+
+  testBanner: {
+    backgroundColor: colors.amber + '25', borderWidth: 1.5, borderColor: colors.amber,
+    borderRadius: 14, padding: 12, marginTop: 16,
+  },
+  testBannerText: { fontSize: 12.5, fontWeight: '600', color: colors.text, lineHeight: 17 },
 
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 16, marginBottom: 20 },
   headerBrandRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },

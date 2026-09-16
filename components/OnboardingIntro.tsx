@@ -7,7 +7,7 @@ import { colors } from '../lib/theme';
 
 const ANIMAL_PREVIEW = ['🦊', '🦉', '🐻', '🐢'];
 
-const SLIDES = ['welcome', 'hours', 'village'] as const;
+const SLIDES = ['welcome', 'hours', 'village', 'requests'] as const;
 
 export function OnboardingIntro({ visible, onDone }: { visible: boolean; onDone: () => void }) {
   const [index, setIndex] = useState(0);
@@ -56,6 +56,23 @@ export function OnboardingIntro({ visible, onDone }: { visible: boolean; onDone:
                 ))}
               </View>
               <Text style={styles.heroTitle}>Find your people</Text>
+            </View>
+          )}
+
+          {slide === 'requests' && (
+            <View style={styles.heroContent}>
+              <View style={styles.avatarRow}>
+                <View style={[styles.avatarBubble, { borderColor: colors.amber }]}>
+                  <Ionicons name="flame" size={22} color={colors.amber} />
+                </View>
+                <View style={[styles.avatarBubble, { marginLeft: -14, borderColor: colors.sage }]}>
+                  <Ionicons name="time" size={22} color={colors.sageDark} />
+                </View>
+                <View style={[styles.avatarBubble, { marginLeft: -14, borderColor: colors.primary }]}>
+                  <Ionicons name="megaphone" size={22} color={colors.primaryDark} />
+                </View>
+              </View>
+              <Text style={styles.heroTitle}>Ask exactly{'\n'}how you need to</Text>
             </View>
           )}
         </LinearGradient>
@@ -135,6 +152,38 @@ export function OnboardingIntro({ visible, onDone }: { visible: boolean; onDone:
                 </View>
               </View>
             </>
+          )}
+
+          {slide === 'requests' && (
+            <View style={styles.rules}>
+              <View style={styles.rule}>
+                <View style={[styles.ruleIcon, { backgroundColor: colors.primaryLight }]}>
+                  <Ionicons name="megaphone" size={18} color={colors.primaryDark} />
+                </View>
+                <View style={styles.ruleText}>
+                  <Text style={styles.ruleTitle}>Post to the whole village, or ask one person</Text>
+                  <Text style={styles.ruleBody}>Send a request to everyone, or go direct to someone specific from their profile.</Text>
+                </View>
+              </View>
+              <View style={styles.rule}>
+                <View style={[styles.ruleIcon, { backgroundColor: colors.amberLight }]}>
+                  <Ionicons name="flame" size={18} color={colors.amber} />
+                </View>
+                <View style={styles.ruleText}>
+                  <Text style={styles.ruleTitle}>Mark it urgent</Text>
+                  <Text style={styles.ruleBody}>Flags the request so neighbors know it can't wait.</Text>
+                </View>
+              </View>
+              <View style={styles.rule}>
+                <View style={[styles.ruleIcon, { backgroundColor: colors.greenLight }]}>
+                  <Ionicons name="time" size={18} color={colors.sageDark} />
+                </View>
+                <View style={styles.ruleText}>
+                  <Text style={styles.ruleTitle}>Or mark it flexible</Text>
+                  <Text style={styles.ruleBody}>Give a date window instead of one fixed time, so it's easier to say yes.</Text>
+                </View>
+              </View>
+            </View>
           )}
         </View>
 

@@ -511,7 +511,7 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: 8, textAlign: 'center' },
   emptyText: { fontSize: 14, color: colors.textSecondary, textAlign: 'center', lineHeight: 22 },
 
-  categoryFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
+  categoryFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8, paddingHorizontal: 20 },
   categoryChip: {
     backgroundColor: colors.card, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 7,
     borderWidth: 1.5, borderColor: colors.borderLight,
