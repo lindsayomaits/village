@@ -5,6 +5,7 @@ import { supabase } from '../../lib/supabase';
 import { StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../lib/theme';
+import { useActionCount } from '../../lib/useActionCount';
 
 type IconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -21,18 +22,16 @@ function tabIcon(focused: boolean, name: IconName, focusedName: IconName) {
 export default function TabLayout() {
   const { family } = useAuth();
   const [pendingConnections, setPendingConnections] = useState(0);
-  const [pendingApprovals, setPendingApprovals] = useState(0);
+  // Requests badge = things waiting on you (offers to approve, time
+  // suggestions to answer) — expired ones excluded. Same count the
+  // banner on the Requests screen explains.
+  const { total: pendingApprovals } = useActionCount(family?.id);
 
   const loadBadgeCounts = useCallback(async () => {
-    if (!family) { setPendingConnections(0); setPendingApprovals(0); return; }
-    const [{ count: connCount }, { count: reqCount }] = await Promise.all([
-      supabase.from('connections').select('id', { count: 'exact', head: true })
-        .eq('status', 'pending').eq('recipient_id', family.id),
-      supabase.from('requests').select('id', { count: 'exact', head: true })
-        .eq('status', 'offered').eq('requesting_family_id', family.id),
-    ]);
+    if (!family) { setPendingConnections(0); return; }
+    const { count: connCount } = await supabase.from('connections').select('id', { count: 'exact', head: true })
+      .eq('status', 'pending').eq('recipient_id', family.id);
     setPendingConnections(connCount ?? 0);
-    setPendingApprovals(reqCount ?? 0);
   }, [family?.id]);
 
   useEffect(() => {
@@ -41,7 +40,6 @@ export default function TabLayout() {
     const channel = supabase
       .channel('tab_badges_rt')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'connections' }, loadBadgeCounts)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'requests' }, loadBadgeCounts)
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [family?.id, loadBadgeCounts]);

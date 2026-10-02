@@ -12,7 +12,7 @@ import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal, ANIMALS } from '../../lib/animals';
-import { calcAge } from '../../lib/utils';
+import { calcAge, formatPhone, formatPhoneInput, formatPhonesInText } from '../../lib/utils';
 import { pickAndUploadAvatar, removeAvatar } from '../../lib/photos';
 import { notifyFamily } from '../../lib/notifications';
 import { OnboardingIntro } from '../../components/OnboardingIntro';
@@ -132,7 +132,7 @@ export default function ProfileScreen() {
     if (family && !dirty) {
       setName(family.name ?? '');
       setParent1Name(family.parent1_name ?? '');
-      setParent1Phone(family.parent1_phone ?? '');
+      setParent1Phone(formatPhone(family.parent1_phone) ?? '');
       setAddress(family.address ?? '');
       setEmergencyContact(family.emergency_contact ?? '');
       setKids(family.kids_data ?? []);
@@ -208,9 +208,9 @@ export default function ProfileScreen() {
       .update({
         name: name.trim(),
         parent1_name: parent1Name.trim() || null,
-        parent1_phone: parent1Phone.trim() || null,
+        parent1_phone: formatPhone(parent1Phone.trim()) || null,
         address: address.trim() || null,
-        emergency_contact: emergencyContact.trim() || null,
+        emergency_contact: formatPhonesInText(emergencyContact.trim()) || null,
         kids_data: kids.filter(k => k.name.trim()).length > 0
           ? kids.filter(k => k.name.trim()).map(k => ({ name: k.name.trim(), birthday: k.birthday, notes: k.notes?.trim() || null }))
           : null,
@@ -288,8 +288,8 @@ export default function ProfileScreen() {
           <TextInput style={styles.input} value={parent1Name} onChangeText={field(setParent1Name)}
             placeholder="e.g. Sarah Smith" placeholderTextColor={colors.textMuted} />
           <Text style={styles.label}>Phone</Text>
-          <TextInput style={styles.input} value={parent1Phone} onChangeText={field(setParent1Phone)}
-            placeholder="e.g. (555) 123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" />
+          <TextInput style={styles.input} value={parent1Phone} onChangeText={v => field(setParent1Phone)(formatPhoneInput(v))}
+            placeholder="e.g. 555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" maxLength={12} />
 
           {/* Address & Emergency */}
           <Text style={styles.sectionHead}>Contact Details</Text>
@@ -299,7 +299,8 @@ export default function ProfileScreen() {
           <Text style={styles.label}>Emergency contact</Text>
           <Text style={styles.hint}>Name + phone of someone to call if neither parent is reachable.</Text>
           <TextInput style={styles.input} value={emergencyContact} onChangeText={field(setEmergencyContact)}
-            placeholder="e.g. Grandma Jo — (555) 246-8101" placeholderTextColor={colors.textMuted} />
+            onBlur={() => setEmergencyContact(v => formatPhonesInText(v) ?? '')}
+            placeholder="e.g. Grandma Jo — 555-246-8101" placeholderTextColor={colors.textMuted} />
 
           {/* Kids */}
           <Text style={styles.sectionHead}>Kids</Text>

@@ -1,8 +1,9 @@
 import { useState, useCallback } from 'react';
 import {
-  View, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, ActivityIndicator,
+  View, StyleSheet, SectionList, TouchableOpacity,
+  RefreshControl, ActivityIndicator, Platform,
 } from 'react-native';
+import Constants from 'expo-constants';
 import { Text } from '../components/Text';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -42,11 +43,17 @@ export default function NotificationsScreen() {
     setLoading(false);
   }, [family?.id]);
 
-  // Opening the screen marks everything read — matches how the bell badge
-  // behaves (it's a "you've seen these" marker, not a per-item inbox).
+  // Opening the screen marks everything read — the bell badge is a "you've
+  // seen these" marker. The rows loaded here keep their unread state for
+  // this visit, so what was new stays grouped under "New" until you leave.
   useFocusEffect(useCallback(() => {
     load().then(() => {
-      if (family) supabase.rpc('mark_all_notifications_read').then(() => {});
+      if (!family) return;
+      supabase.rpc('mark_all_notifications_read').then(() => {});
+      const inExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === 'storeClient';
+      if (Platform.OS !== 'web' && !inExpoGo) {
+        (require('expo-notifications') as typeof import('expo-notifications')).setBadgeCountAsync(0).catch(() => {});
+      }
     });
   }, [family?.id, load]));
 
@@ -69,6 +76,7 @@ export default function NotificationsScreen() {
       disabled={!item.path}
       activeOpacity={item.path ? 0.7 : 1}
     >
+      {!item.read_at && <View style={styles.unreadDot} />}
       <View style={styles.rowBody}>
         <Text style={styles.rowTitle}>{item.title}</Text>
         <Text style={styles.rowText}>{item.body}</Text>
@@ -95,10 +103,15 @@ export default function NotificationsScreen() {
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
       ) : (
-        <FlatList
-          data={items}
+        <SectionList
+          sections={[
+            { title: `New (${items.filter(i => !i.read_at).length})`, data: items.filter(i => !i.read_at) },
+            { title: 'Earlier', data: items.filter(i => i.read_at) },
+          ].filter(sec => sec.data.length > 0)}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
+          renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
+          stickySectionHeadersEnabled={false}
           contentContainerStyle={styles.list}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
           ListEmptyComponent={
@@ -128,6 +141,8 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: colors.borderLight,
   },
   rowUnread: { borderColor: colors.primary + '55', backgroundColor: colors.primaryLight + '55' },
+  unreadDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary },
+  sectionHeader: { fontSize: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 8, marginBottom: 8 },
   rowBody: { flex: 1, gap: 3 },
   rowTitle: { fontSize: 14, fontWeight: '800', color: colors.text },
   rowText: { fontSize: 13, color: colors.textSecondary, lineHeight: 18 },

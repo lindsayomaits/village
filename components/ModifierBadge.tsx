@@ -9,6 +9,9 @@ const MODIFIER: Record<string, { label: string; icon: keyof typeof Ionicons.glyp
   rate2x:    { label: '2× rate',        icon: 'flash-outline',      color: colors.amber, border: colors.amber + '60' },
   flexible:  { label: 'Flexible dates', icon: 'calendar-outline',   color: colors.textSecondary, border: colors.border },
   sent:      { label: 'Sent to you',    icon: 'arrow-redo-outline', color: colors.textSecondary, border: colors.border },
+  private:   { label: 'Private',        icon: 'lock-closed-outline', color: colors.textSecondary, border: colors.border },
+  newTime:   { label: 'New time suggested', icon: 'time-outline',   fill: colors.amberLight, color: colors.primaryDark },
+  action:    { label: 'Needs your response', icon: 'alert-circle-outline', fill: colors.primary, color: '#fff' },
 };
 
 export function ModifierBadge({ kind }: { kind: keyof typeof MODIFIER }) {

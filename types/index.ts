@@ -152,7 +152,7 @@ export type Request = {
   date: string;
   start_time: string;
   duration_hours: number;
-  status: 'open' | 'offered' | 'accepted' | 'completed' | 'cancelled';
+  status: 'open' | 'offered' | 'accepted' | 'completed' | 'cancelled' | 'expired';
   fulfilling_family_id: string | null;
   fulfilling_family?: Family;
   is_overnight: boolean;
@@ -166,6 +166,13 @@ export type Request = {
   target_household?: Family;
   settled_at: string | null;
   reversed_at: string | null;
+  expired_at: string | null;
+  // A live "can we do this time instead?" — set by either party, answered
+  // by the other (see propose_request_time / respond_to_time_proposal).
+  proposed_date: string | null;
+  proposed_start_time: string | null;
+  proposed_note: string | null;
+  proposed_by: string | null;
   created_at: string;
 };
 

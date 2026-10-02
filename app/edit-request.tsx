@@ -9,6 +9,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { supabase } from '../lib/supabase';
 import { colors } from '../lib/theme';
+import { toLocalDateString, todayString } from '../lib/utils';
+import { isExpired } from '../lib/requestState';
 import type { Request, RequestCategory } from '../types';
 
 const DURATION_OPTIONS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8];
@@ -372,6 +374,14 @@ export default function EditRequestScreen() {
     const flexTimePrefBase = TIME_PREFS.find(t => t.key === requestTimePref)?.label ?? 'Flexible';
     const flexStartTime = requestDays.length > 0 ? `${flexTimePrefBase} · ${requestDays.join(', ')}` : flexTimePrefBase;
 
+    // Reposting an expired request: it needs a date that hasn't passed,
+    // and goes back on the board as a fresh open post.
+    const reposting = !!request && isExpired(request);
+    const lastDate = toLocalDateString(isFixedDateCategory ? pickupDate : timingFlexible ? flexEndDate : date);
+    if (reposting && lastDate < todayString()) {
+      return Alert.alert('Pick a new date', "This request expired — choose a date that hasn't passed yet to repost it.");
+    }
+
     setSaving(true);
     const { error } = await supabase.from('requests').update({
       category,
@@ -386,6 +396,7 @@ export default function EditRequestScreen() {
       is_overnight: isFixedDateCategory,
       is_urgent: isUrgent,
       notes: notes.trim() || null,
+      ...(reposting ? { status: 'open', fulfilling_family_id: null, expired_at: null, reminder_sent: false, sit_reminder_sent: false } : {}),
     }).eq('id', requestId);
 
     setSaving(false);
@@ -411,7 +422,7 @@ export default function EditRequestScreen() {
             <TouchableOpacity onPress={() => router.back()}>
               <Text style={styles.back}>← Back</Text>
             </TouchableOpacity>
-            <Text style={styles.screenTitle}>Edit Request</Text>
+            <Text style={styles.screenTitle}>{request && isExpired(request) ? 'Repost Request' : 'Edit Request'}</Text>
             <View style={{ width: 60 }} />
           </View>
 
@@ -870,7 +881,7 @@ export default function EditRequestScreen() {
           />
 
           <TouchableOpacity style={styles.submitBtn} onPress={handleSave} disabled={saving}>
-            {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>Save Changes</Text>}
+            {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>{request && isExpired(request) ? 'Repost' : 'Save Changes'}</Text>}
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>

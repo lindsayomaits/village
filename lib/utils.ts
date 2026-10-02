@@ -41,6 +41,36 @@ export function formatPhone(raw: string | null | undefined): string | null {
   return raw;
 }
 
+// Live formatting for a phone field as it's typed — 7404244502 becomes
+// 740-424-4502 progressively, without fighting the user mid-entry.
+export function formatPhoneInput(raw: string): string {
+  let digits = raw.replace(/\D/g, '');
+  if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
+  digits = digits.slice(0, 10);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+// Free-text fields (emergency contact: "Grandma Jo (740) 424 4502") get
+// any US-looking number inside them normalized to 740-424-4502.
+export function formatPhonesInText(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  return raw.replace(/(?:\+?1[\s.-]?)?\(?\b(\d{3})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/g, '$1-$2-$3');
+}
+
+// YYYY-MM-DD in the device's timezone. toISOString() is UTC, which in the
+// evening (US time) already reads as tomorrow.
+export function toLocalDateString(d: Date): string {
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+export function todayString(): string {
+  return toLocalDateString(new Date());
+}
+
 // Replaces birth year patterns with calculated age.
 // Supports: "born 2018", "(born 2018)", "b. 2018-03", "dob 2018/03/15", "(2018)"
 export function renderKidsInfo(raw: string | null | undefined): string | null {

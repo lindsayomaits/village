@@ -11,7 +11,11 @@ import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors, buttonStyles } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
-import { notifyFamily } from '../../lib/notifications';
+import { notifyFamily, notifyConnections } from '../../lib/notifications';
+import { todayString } from '../../lib/utils';
+import { isExpired, isArchived, needsMyAction, proposalAwaitingMe, formatShortDate, ARCHIVE_AFTER_DAYS } from '../../lib/requestState';
+import { promptReachOut } from '../../lib/reachOut';
+import { useActionCount } from '../../lib/useActionCount';
 import { StatusBadge } from '../../components/StatusBadge';
 import { ModifierBadge } from '../../components/ModifierBadge';
 import type { Request } from '../../types';
@@ -27,6 +31,8 @@ export default function RequestsScreen() {
   const [filter, setFilter] = useState<Filter>('open');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const actions = useActionCount(family?.id);
   const loadSeq = useRef(0);
 
   async function loadConnections() {
@@ -50,47 +56,70 @@ export default function RequestsScreen() {
     // from just before the tap wins and the approval seems to not show up
     // until you leave and come back). Only the latest issued call commits.
     const seq = ++loadSeq.current;
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayString();
+    const myId = family?.id ?? '';
     const ids = await loadConnections();
     if (seq !== loadSeq.current) return;
 
+    const select = '*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*), target_household:families!target_household_id(*)';
     let query = supabase
       .from('requests')
-      .select('*, requesting_family:families!requesting_family_id(*), fulfilling_family:families!fulfilling_family_id(*)')
+      .select(select)
       .eq('post_type', 'request')
       .order('date', { ascending: true })
       .order('start_time', { ascending: true });
-
 
     if (filter === 'open') {
       // A request sent directly to one household (target_household_id set)
       // shouldn't show up in every other connection's Open feed too —
       // only the requester's own general (untargeted) posts, plus
-      // anything targeted specifically at me.
+      // anything targeted specifically at me. Nothing whose date (or
+      // flexible window) has already passed — that's expired, not open.
       query = query
         .eq('status', 'open')
         .in('requesting_family_id', ids ?? [])
-        .or(`target_household_id.is.null,target_household_id.eq.${family?.id ?? ''}`);
+        .or(`target_household_id.is.null,target_household_id.eq.${myId}`)
+        .or(`end_date.gte.${today},and(end_date.is.null,date.gte.${today})`);
     } else if (filter === 'mine') {
       query = query
-        .eq('requesting_family_id', family?.id ?? '')
-        .in('status', ['open', 'offered', 'accepted', 'completed']);
+        .eq('requesting_family_id', myId)
+        .in('status', ['open', 'offered', 'accepted']);
     } else if (filter === 'upcoming') {
       query = query
         .in('status', ['offered', 'accepted'])
         .gte('date', today)
-        .or(`requesting_family_id.eq.${family?.id ?? ''},fulfilling_family_id.eq.${family?.id ?? ''}`);
+        .or(`requesting_family_id.eq.${myId},fulfilling_family_id.eq.${myId}`);
     }
 
-    const { data } = await query;
+    // Finished things (completed, expired) for the bottom of Mine /
+    // Scheduled — greyed for a week, then archived behind a toggle.
+    const doneQuery = filter === 'open'
+      ? Promise.resolve({ data: [] as Request[] })
+      : supabase
+          .from('requests')
+          .select(select)
+          .eq('post_type', 'request')
+          .in('status', filter === 'mine' ? ['completed', 'expired'] : ['completed'])
+          .or(filter === 'mine' ? `requesting_family_id.eq.${myId}` : `requesting_family_id.eq.${myId},fulfilling_family_id.eq.${myId}`)
+          .order('date', { ascending: false })
+          .limit(100);
+
+    const [{ data }, { data: done }] = await Promise.all([query, doneQuery]);
     if (seq !== loadSeq.current) return;
-    // Past-due (date already gone, still unresolved) sinks to the bottom
-    // instead of cluttering the top of an ascending date sort.
-    const sorted = [...(data ?? [])].sort((a, b) => {
-      const aPast = a.status !== 'completed' && (a.end_date ?? a.date) < today;
-      const bPast = b.status !== 'completed' && (b.end_date ?? b.date) < today;
-      if (aPast !== bPast) return aPast ? 1 : -1;
-      if (!aPast && a.is_urgent !== b.is_urgent) return a.is_urgent ? -1 : 1;
+
+    // Needs-my-response first, then live items by urgency/date, then
+    // finished ones (completed/expired), most recent first.
+    const rank = (r: Request) => {
+      if (r.status === 'completed' || isExpired(r, today)) return 2;
+      if (needsMyAction(r, myId)) return 0;
+      return 1;
+    };
+    const all = [...(data ?? []), ...((done ?? []) as Request[])];
+    const sorted = all.sort((a, b) => {
+      const ra = rank(a), rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      if (ra === 2) return (b.end_date ?? b.date).localeCompare(a.end_date ?? a.date);
+      if (a.is_urgent !== b.is_urgent) return a.is_urgent ? -1 : 1;
       if (a.date !== b.date) return a.date < b.date ? -1 : 1;
       return a.start_time.localeCompare(b.start_time);
     });
@@ -102,7 +131,7 @@ export default function RequestsScreen() {
     if (params.filter === 'open' || params.filter === 'mine' || params.filter === 'upcoming') setFilter(params.filter);
   }, [params.filter]);
 
-  useFocusEffect(useCallback(() => { loadRequests(); }, [filter]));
+  useFocusEffect(useCallback(() => { loadRequests(); actions.refresh(); }, [filter]));
 
   async function onRefresh() {
     setRefreshing(true);
@@ -137,10 +166,12 @@ export default function RequestsScreen() {
 
   async function offerRequest(req: Request) {
     if (!family) return;
-    Alert.alert('Offer to help?', offerDialogBody(req), [
+    const flexible = !!(req.category_details as { timing_flexible?: boolean } | null)?.timing_flexible;
+    Alert.alert(flexible ? 'When works for you?' : 'Offer to help?', offerDialogBody(req) + (flexible ? `\n\nTheir timing is flexible (${req.start_time}).` : ''), [
       { text: 'Not now', style: 'cancel' },
+      { text: 'Suggest a time', onPress: () => router.push({ pathname: '/request/[id]', params: { id: req.id, propose: '1' } }) },
       {
-        text: 'Send offer', onPress: async () => {
+        text: flexible ? 'Any time works' : 'Send offer', onPress: async () => {
           const { error } = await supabase.rpc('offer_request', { p_request_id: req.id, p_offering_family_id: family.id });
           if (error) return Alert.alert('Error', error.message);
           await notifyFamily(req.requesting_family_id, '🙋 Someone offered to help!', `${family.name} offered to help — open the app to approve or decline`, { path: `/(tabs)/requests?filter=mine` });
@@ -184,12 +215,55 @@ export default function RequestsScreen() {
   }
 
   async function withdrawOffer(req: Request) {
+    if (!family) return;
     Alert.alert('Withdraw your offer?', 'The request goes back to available.', [
       { text: 'Keep it', style: 'cancel' },
       { text: 'Withdraw', style: 'destructive', onPress: async () => {
         const { error } = await supabase.rpc('retract_offer', { p_request_id: req.id });
         if (error) return Alert.alert('Error', error.message);
+        await notifyFamily(req.requesting_family_id, '↩️ Offer withdrawn', `${family.name} withdrew their offer on "${req.title}" — it's back on the board`, { path: `/request/${req.id}` });
         await loadRequests();
+        promptReachOut(router, req.requesting_family, {
+          title: `Let ${req.requesting_family?.name ?? 'them'} know?`,
+          message: "They've been notified, but a quick personal note goes a long way.",
+          prefill: `Hi! I'm sorry — I had to withdraw my offer for "${req.title}" on ${formatDate(req.date)}. `,
+        });
+      }},
+    ]);
+  }
+
+  function openToVillage(req: Request) {
+    if (!family) return;
+    Alert.alert(
+      'Open to your whole village?',
+      `Right now only ${req.target_household?.name ?? 'one household'} can see this. Opening it lets all your connections see it and offer to help.`,
+      [
+        { text: 'Keep private', style: 'cancel' },
+        {
+          text: 'Open it up', onPress: async () => {
+            const { error } = await supabase.from('requests').update({ target_household_id: null }).eq('id', req.id);
+            if (error) return Alert.alert('Error', error.message);
+            await notifyConnections(
+              family.id,
+              `${req.is_urgent ? '❗️ URGENT: ' : ''}New request in VillageMates`,
+              `${family.name} needs help: "${req.title}" on ${formatDate(req.date)}`,
+              { path: `/request/${req.id}` },
+              req.category,
+            );
+            await loadRequests();
+          },
+        },
+      ],
+    );
+  }
+
+  function removeRequest(req: Request) {
+    Alert.alert('Remove this request?', "It'll be deleted for good. No hours were ever moved for it.", [
+      { text: 'Keep it', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: async () => {
+        const { error } = await supabase.from('requests').delete().eq('id', req.id);
+        if (error) return Alert.alert('Error', error.message);
+        loadRequests();
       }},
     ]);
   }
@@ -255,8 +329,18 @@ export default function RequestsScreen() {
           const { error } = await supabase.rpc('cancel_accepted_request', { p_request_id: req.id, p_family_id: family.id });
           if (error) return Alert.alert('Error', error.message);
           const other = isOwn ? req.fulfilling_family_id : req.requesting_family_id;
-          if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`, { path: `/(tabs)/requests?filter=${isOwn ? 'open' : 'mine'}` });
+          const otherFamily = isOwn ? req.fulfilling_family : req.requesting_family;
+          if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`, { path: `/request/${req.id}` });
           await Promise.all([loadRequests(), refreshFamily()]);
+          promptReachOut(router, otherFamily, {
+            title: `Reach out to ${otherFamily?.name ?? 'them'}?`,
+            message: within24h
+              ? "It's less than a day away — please contact them directly so they're not left without help."
+              : "They've been notified, but a personal message helps them re-plan.",
+            prefill: isOwn
+              ? `Hi! I'm sorry — I had to cancel "${req.title}" on ${formatDate(req.date)}. `
+              : `Hi! I'm so sorry — I have to back out of "${req.title}" on ${formatDate(req.date)}. `,
+          });
         },
       },
     ]);
@@ -264,9 +348,7 @@ export default function RequestsScreen() {
 
   // ── Helpers ────────────────────────────────────────────────────
 
-  function formatDate(dateStr: string) {
-    return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  }
+  const formatDate = formatShortDate;
 
   // A short fact about the specific category, shown as a fact chip —
   // e.g. which house, what the dog needs, what the labor job is.
@@ -313,6 +395,7 @@ export default function RequestsScreen() {
     if (item.status === 'accepted') return `${requester} requested · ${fulfiller} confirmed to help`;
     if (item.status === 'completed') return `${requester} requested · ${fulfiller} helped`;
     if (item.status === 'cancelled') return `${requester} requested · Cancelled`;
+    if (item.status === 'expired') return `${requester} requested · Expired, nobody confirmed`;
     return requester;
   }
 
@@ -323,9 +406,17 @@ export default function RequestsScreen() {
     const isFulfiller = item.fulfilling_family_id === family?.id;
     const isConfirmed = item.status === 'accepted' || item.status === 'completed';
     const hasOffer = item.status === 'offered';
-    // Multi-day (overnight) requests aren't past due until the actual end
-    // date passes, not the start/drop-off date.
-    const isPastDue = item.status !== 'completed' && (item.end_date ?? item.date) < new Date().toISOString().split('T')[0];
+    // Multi-day (overnight/flexible) requests aren't past until the
+    // actual end date passes. Open/offered past their date = expired;
+    // accepted past their date = waiting on the settlement sweep.
+    const today = todayString();
+    const expired = isExpired(item, today);
+    const isPastDue = item.status === 'accepted' && !item.settled_at && (item.end_date ?? item.date) < today;
+    const isDone = expired || item.status === 'completed';
+    const actionNeeded = needsMyAction(item, family?.id);
+    const hasProposal = !!item.proposed_date;
+    const proposalForMe = proposalAwaitingMe(item, family?.id);
+    const isPrivate = isOwn && !!item.target_household_id && item.status === 'open' && !expired;
 
     const contactFamily = isOwn ? item.fulfilling_family : item.requesting_family;
     const showContact = (hasOffer || isConfirmed) && contactFamily;
@@ -341,23 +432,34 @@ export default function RequestsScreen() {
       <TouchableOpacity
         activeOpacity={0.85}
         onPress={() => router.push(`/request/${item.id}`)}
-        style={[styles.card, isPastDue && styles.cardPastDue, item.is_urgent && !isPastDue && styles.cardUrgent]}
+        style={[
+          styles.card,
+          isDone && styles.cardDone,
+          isPastDue && styles.cardPastDue,
+          item.is_urgent && !isPastDue && !isDone && styles.cardUrgent,
+          actionNeeded && styles.cardAction,
+        ]}
       >
         <View style={styles.topRow}>
           <View style={styles.topLeftPills}>
-            {isPastDue ? (
+            {actionNeeded && <ModifierBadge kind="action" />}
+            {expired ? (
+              <StatusBadge status="expired" />
+            ) : isPastDue ? (
               <View style={[styles.badge, styles.pastDueBadge]}><Text style={[styles.badgeText, styles.pastDueBadgeText]}>⏰ Past date</Text></View>
-            ) : item.is_urgent ? (
+            ) : item.is_urgent && !isDone ? (
               <ModifierBadge kind="urgent" />
             ) : (
               <StatusBadge status={item.status} />
             )}
-            {!isPastDue && item.category === 'manual_labor' && <ModifierBadge kind="rate2x" />}
+            {hasProposal && !isDone && !actionNeeded && <ModifierBadge kind="newTime" />}
+            {isPrivate && <ModifierBadge kind="private" />}
+            {!isPastDue && !isDone && item.category === 'manual_labor' && <ModifierBadge kind="rate2x" />}
           </View>
           <View style={styles.avatarSquare}><Text style={styles.avatarEmoji}>{avatarEmoji}</Text></View>
         </View>
 
-        <Text style={[styles.cardTitle, isPastDue && styles.cardTitlePastDue]}>{item.title}</Text>
+        <Text style={[styles.cardTitle, (isPastDue || isDone) && styles.cardTitlePastDue]}>{item.title}</Text>
         <Text style={styles.cardFamily}>
           {roleLine(item, isOwn, isFulfiller)}
           {item.category === 'kid_sit' && item.kid_name ? `  ·  ${item.kid_name}` : ''}
@@ -376,10 +478,17 @@ export default function RequestsScreen() {
             </>
           )}
           {detailText && <FactChip text={detailText} />}
-          {!isPastDue && item.is_overnight && <ModifierBadge kind="overnight" />}
-          {!isPastDue && timingFlexible && <ModifierBadge kind="flexible" />}
-          {!isPastDue && sentToYou && <ModifierBadge kind="sent" />}
+          {!isPastDue && !isDone && item.is_overnight && <ModifierBadge kind="overnight" />}
+          {!isPastDue && !isDone && timingFlexible && <ModifierBadge kind="flexible" />}
+          {!isPastDue && !isDone && sentToYou && <ModifierBadge kind="sent" />}
         </View>
+
+        {hasProposal && !isDone && (
+          <Text style={styles.proposalLine}>
+            🕐 {item.proposed_by === family?.id ? 'You suggested' : `${item.proposed_by === item.requesting_family_id ? item.requesting_family?.name : item.fulfilling_family?.name} suggested`}{' '}
+            <Text style={styles.proposalLineWhen}>{formatDate(item.proposed_date!)} · {item.proposed_start_time}</Text>
+          </Text>
+        )}
 
         {item.notes ? <Text style={styles.cardNotes}>{item.notes}</Text> : null}
 
@@ -392,7 +501,23 @@ export default function RequestsScreen() {
         )}
         {/* ── Actions ── */}
         <View style={styles.cardActions}>
-          {item.status === 'open' && !isOwn && (
+          {expired && isOwn && (
+            <View style={styles.doneActions}>
+              <TouchableOpacity style={[buttonStyles.secondary.container, { flex: 1 }]} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: item.id } })}>
+                <Text style={buttonStyles.secondary.text}>Repost</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[buttonStyles.ghost.container, { flex: 1 }]} onPress={() => removeRequest(item)}>
+                <Text style={buttonStyles.ghost.text}>Remove</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {proposalForMe && !isDone && (
+            <TouchableOpacity style={buttonStyles.spend.container} onPress={() => router.push(`/request/${item.id}`)}>
+              <Text style={buttonStyles.spend.text}>Review suggested time →</Text>
+            </TouchableOpacity>
+          )}
+          {!expired && item.status === 'open' && !isOwn && (
+            <>
             <View style={styles.primaryActionRow}>
               <TouchableOpacity style={[buttonStyles.earn.container, styles.primaryActionBtn]} onPress={() => offerRequest(item)}>
                 <Text style={buttonStyles.earn.text}>Offer to help</Text>
@@ -405,9 +530,18 @@ export default function RequestsScreen() {
                 <Text style={styles.amountCaption}>you earn</Text>
               </View>
             </View>
+            <TouchableOpacity style={styles.suggestLink} onPress={() => router.push({ pathname: '/request/[id]', params: { id: item.id, propose: '1' } })}>
+              <Text style={styles.suggestLinkText}>🕐 {timingFlexible ? 'Pick a time that works for you' : 'Suggest a different time'}</Text>
+            </TouchableOpacity>
+            </>
           )}
-          {item.status === 'open' && isOwn && (
+          {!expired && item.status === 'open' && isOwn && (
             <View style={styles.openOwnActions}>
+              {isPrivate && (
+                <TouchableOpacity style={buttonStyles.earn.container} onPress={() => openToVillage(item)}>
+                  <Text style={buttonStyles.earn.text}>🏘 Open to entire village</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: item.id } })}>
                 <Text style={buttonStyles.secondary.text}>Edit</Text>
               </TouchableOpacity>
@@ -416,7 +550,7 @@ export default function RequestsScreen() {
               </TouchableOpacity>
             </View>
           )}
-          {item.status === 'offered' && isOwn && (
+          {!expired && item.status === 'offered' && isOwn && !hasProposal && (
             <View style={styles.offeredActions}>
               <Text style={styles.offeredPrompt}>{item.fulfilling_family?.name} wants to help — approve to confirm!</Text>
               <View style={styles.primaryActionRow}>
@@ -436,12 +570,12 @@ export default function RequestsScreen() {
               </TouchableOpacity>
             </View>
           )}
-          {item.status === 'offered' && isFulfiller && (
+          {!expired && item.status === 'offered' && isFulfiller && !proposalForMe && (
             <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => withdrawOffer(item)}>
               <Text style={buttonStyles.secondary.text}>Withdraw my offer</Text>
             </TouchableOpacity>
           )}
-          {item.status === 'offered' && !isOwn && !isFulfiller && (
+          {!expired && item.status === 'offered' && !isOwn && !isFulfiller && (
             <View style={styles.offeredElsewhere}><Text style={styles.offeredElsewhereText}>Offer pending approval</Text></View>
           )}
 
@@ -470,6 +604,14 @@ export default function RequestsScreen() {
       </TouchableOpacity>
     );
   };
+
+  const visible = requests.filter(r => showArchived || !isArchived(r));
+  const archivedCount = requests.length - requests.filter(r => !isArchived(r)).length;
+  const actionHere = requests.filter(r => needsMyAction(r, family?.id)).length;
+  // Where the waiting items live, so the banner can jump there from
+  // another tab: your own posts are in Mine, ones you're helping with
+  // in Scheduled.
+  const actionFilter: Filter = actions.mine > 0 ? 'mine' : 'upcoming';
 
   const statusFilters: { key: Filter; label: string }[] = [
     { key: 'open',     label: 'Village' },
@@ -500,7 +642,28 @@ export default function RequestsScreen() {
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
       ) : (
         <FlatList
-          data={requests}
+          data={visible}
+          ListHeaderComponent={actions.total > 0 ? (
+            <TouchableOpacity
+              style={styles.actionBanner}
+              disabled={actionHere > 0}
+              onPress={() => { setFilter(actionFilter); setLoading(true); }}
+            >
+              <MaterialIcons name="notifications-active" size={18} color={colors.primaryDark} />
+              <Text style={styles.actionBannerText}>
+                {actions.total === 1 ? '1 request needs' : `${actions.total} requests need`} your response
+                {actionHere > 0 ? ' — marked below, at the top' : ` — tap to see ${actions.total === 1 ? 'it' : 'them'}`}
+              </Text>
+              {actionHere === 0 && <MaterialIcons name="chevron-right" size={18} color={colors.primaryDark} />}
+            </TouchableOpacity>
+          ) : null}
+          ListFooterComponent={archivedCount > 0 ? (
+            <TouchableOpacity style={styles.archiveToggle} onPress={() => setShowArchived(v => !v)}>
+              <Text style={styles.archiveToggleText}>
+                {showArchived ? 'Hide archive' : `View archive (${archivedCount}) · finished more than ${ARCHIVE_AFTER_DAYS} days ago`}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           contentContainerStyle={styles.list}
@@ -542,6 +705,17 @@ const styles = StyleSheet.create({
   list: { paddingHorizontal: 20, paddingBottom: 32 },
   card: { backgroundColor: colors.card, borderRadius: 16, padding: 14, marginBottom: 10, borderWidth: 1.5, borderColor: colors.borderLight, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   cardPastDue: { opacity: 0.55, borderColor: colors.red + '60', shadowOpacity: 0 },
+  cardDone: { opacity: 0.55, backgroundColor: colors.borderLight, borderColor: colors.borderLight, shadowOpacity: 0, elevation: 0 },
+  cardAction: { borderColor: colors.primary, borderWidth: 2 },
+  proposalLine: { fontSize: 13, color: colors.primaryDark, fontWeight: '600', marginBottom: 8 },
+  proposalLineWhen: { fontWeight: '800', color: colors.text },
+  suggestLink: { alignItems: 'center', paddingVertical: 10 },
+  suggestLinkText: { fontSize: 13, fontWeight: '700', color: colors.sageDark },
+  doneActions: { flexDirection: 'row', gap: 8 },
+  actionBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.primaryLight, borderRadius: 12, borderWidth: 1.5, borderColor: colors.primary + '60', padding: 12, marginBottom: 10 },
+  actionBannerText: { flex: 1, fontSize: 13, fontWeight: '700', color: colors.primaryDark },
+  archiveToggle: { alignItems: 'center', paddingVertical: 16 },
+  archiveToggleText: { fontSize: 13, fontWeight: '700', color: colors.textMuted, textDecorationLine: 'underline' },
   cardUrgent: { borderColor: colors.red, borderWidth: 2 },
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
   topLeftPills: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, flex: 1 },

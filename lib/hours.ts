@@ -1,7 +1,10 @@
 import { supabase } from './supabase';
+import { isExpired } from './requestState';
 
 type PendingRow = {
   status: string;
+  date: string;
+  end_date: string | null;
   duration_hours: number;
   requesting_family_id: string;
   fulfilling_family_id: string | null;
@@ -11,10 +14,13 @@ type PendingRow = {
 async function fetchPendingRows(familyId: string): Promise<PendingRow[]> {
   const { data } = await supabase
     .from('requests')
-    .select('status, duration_hours, requesting_family_id, fulfilling_family_id, settled_at')
+    .select('status, date, end_date, duration_hours, requesting_family_id, fulfilling_family_id, settled_at')
     .or(`requesting_family_id.eq.${familyId},fulfilling_family_id.eq.${familyId}`)
     .or('status.in.(open,offered),and(status.eq.accepted,settled_at.is.null)');
-  return data ?? [];
+  // An open/offered request whose date already passed with nobody
+  // confirmed will never move hours — it's expired, not pending, even if
+  // the daily server sweep hasn't flipped its status yet.
+  return (data ?? []).filter(r => !isExpired(r));
 }
 
 // A request only actually moves hours once it auto-settles on its scheduled

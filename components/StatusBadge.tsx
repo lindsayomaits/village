@@ -19,6 +19,7 @@ const STATUS_STYLE: Record<string, {
   accepted:  { label: 'Accepted',  icon: 'checkmark-circle',         border: 'none',   fill: colors.sage,        color: '#fff' },
   completed: { label: 'Completed', icon: 'checkmark-done-outline',   border: 'none',   fill: colors.borderLight, color: colors.textSecondary },
   cancelled: { label: 'Cancelled', icon: 'close-circle-outline',     border: 'hollow', color: colors.textMuted, strike: true },
+  expired:   { label: 'Expired',   icon: 'time-outline',             border: 'hollow', color: colors.textMuted },
 };
 
 export function StatusBadge({ status }: { status: string }) {

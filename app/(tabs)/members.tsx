@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, ActivityIndicator, Modal, ScrollView, Alert, TextInput, Switch,
+  RefreshControl, ActivityIndicator, Modal, ScrollView, Alert, TextInput, Switch, Keyboard,
 } from 'react-native';
 import { Text } from '../../components/Text';
 import { Avatar } from '../../components/Avatar';
@@ -41,6 +41,7 @@ export default function MembersScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const loadSeq = useRef(0);
   const [search, setSearch] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<Family | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
@@ -156,12 +157,17 @@ export default function MembersScreen() {
   );
 
   const searchLower = search.trim().toLowerCase();
-  const discoverHouseholds = (searchLower.length < 2 && !categoryFilter) ? [] : allHouseholds.filter(h => {
+  // While typing a name, the connect-code box and category chips fold
+  // away so matches show right under the search box, above the keyboard.
+  const searching = searchFocused || searchLower.length > 0;
+  const discoverHouseholds = (searchLower.length < 1 && !categoryFilter) ? [] : allHouseholds.filter(h => {
     if (h.id === myHousehold?.id) return false;
     if (connectedIds.includes(h.id)) return false;
     if (h.discoverable === false) return false;
     if (blockedIds.has(h.id)) return false;
-    if (searchLower.length >= 2 && !h.name.toLowerCase().includes(searchLower)) return false;
+    if (searchLower.length >= 1
+      && !h.name.toLowerCase().includes(searchLower)
+      && !(h.parent1_name ?? '').toLowerCase().includes(searchLower)) return false;
     if (categoryFilter && !(h.services_offered ?? []).includes(categoryFilter)) return false;
     return true;
   });
@@ -285,6 +291,8 @@ export default function MembersScreen() {
         <>
           {tab === 'find_people' && (
             <>
+              {!searching && (
+              <>
               <View style={styles.codeRow}>
                 <TextInput
                   style={styles.codeInput}
@@ -307,16 +315,28 @@ export default function MembersScreen() {
                 </TouchableOpacity>
               </View>
               <Text style={styles.orDivider}>or search by name</Text>
-              <View style={styles.searchRow}>
+              </>
+              )}
+              <View style={[styles.searchRow, searching && { marginTop: 8 }]}>
                 <TextInput
-                  style={styles.searchInput}
+                  style={[styles.searchInput, { flex: 1 }]}
                   placeholder="Search by name..."
                   placeholderTextColor={colors.textMuted}
                   value={search}
                   onChangeText={setSearch}
+                  onFocus={() => setSearchFocused(true)}
+                  onBlur={() => setSearchFocused(false)}
                   clearButtonMode="while-editing"
+                  autoCorrect={false}
                 />
+                {searching && (
+                  <TouchableOpacity style={styles.searchCancel} onPress={() => { setSearch(''); Keyboard.dismiss(); }}>
+                    <Text style={styles.searchCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                )}
               </View>
+              {!searching && (
+              <>
               <Text style={styles.orDivider}>or browse who's open to help with</Text>
               <View style={styles.categoryFilterRow}>
                 {Object.entries(CATEGORY_LABELS).map(([key, { emoji, label }]) => (
@@ -329,6 +349,8 @@ export default function MembersScreen() {
                   </TouchableOpacity>
                 ))}
               </View>
+              </>
+              )}
             </>
           )}
 
@@ -375,9 +397,9 @@ export default function MembersScreen() {
             discoverHouseholds.length === 0 ? (
               <View style={styles.empty}>
                 <Text style={styles.emptyEmoji}>🔍</Text>
-                <Text style={styles.emptyTitle}>{searchLower.length >= 2 || categoryFilter ? 'No results' : 'Know someone already?'}</Text>
+                <Text style={styles.emptyTitle}>{searchLower.length >= 1 || categoryFilter ? 'No results' : searching ? 'Start typing a name' : 'Know someone already?'}</Text>
                 <Text style={styles.emptyText}>
-                  {searchLower.length >= 2 || categoryFilter
+                  {searchLower.length >= 1 || categoryFilter
                     ? 'Try a different name or category.'
                     : 'Ask for their connect code above, search by name, or browse by what people are open to helping with.'}
                 </Text>
@@ -388,6 +410,7 @@ export default function MembersScreen() {
                 keyExtractor={(item) => item.id}
                 renderItem={renderHouseholdCard}
                 contentContainerStyle={styles.list}
+                keyboardShouldPersistTaps="handled"
                 refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
               />
             )
@@ -458,7 +481,9 @@ const styles = StyleSheet.create({
     marginTop: 10, marginBottom: 4,
   },
 
-  searchRow: { paddingHorizontal: 20, marginBottom: 8 },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, marginBottom: 8 },
+  searchCancel: { paddingVertical: 8 },
+  searchCancelText: { fontSize: 15, fontWeight: '600', color: colors.primary },
   searchInput: {
     backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border,
     borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12,

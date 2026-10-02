@@ -13,6 +13,8 @@ import { supabase } from '../../lib/supabase';
 import { colors } from '../../lib/theme';
 import { getFamilyAnimal } from '../../lib/animals';
 import { getPendingBreakdown } from '../../lib/hours';
+import { todayString } from '../../lib/utils';
+import { isExpired, proposalAwaitingMe } from '../../lib/requestState';
 import { useUnreadNotifications } from '../../lib/useUnreadNotifications';
 import { StatusBadge } from '../../components/StatusBadge';
 import { HourBalanceCard } from '../../components/HourBalanceCard';
@@ -89,14 +91,18 @@ export default function HomeScreen() {
 
   const balance = family?.hours_balance ?? 0;
 
-  const myRequests = myItems.filter(r => r.requesting_family_id === family?.id);
+  const today = todayString();
+  // Past-date open/offered requests are expired — they never moved hours
+  // and don't belong in the live sections. One quiet line points at them.
+  const expiredMine = myItems.filter(r => r.requesting_family_id === family?.id && isExpired(r, today));
+  const liveItems = myItems.filter(r => !isExpired(r, today));
+  const myRequests = liveItems.filter(r => r.requesting_family_id === family?.id);
   const myRequestsOpen = myRequests.filter(r => r.status === 'open');
   const myRequestsPending = myRequests.filter(r => r.status === 'offered');
   const myRequestsScheduled = myRequests.filter(r => r.status === 'accepted');
 
-  const helpingPending = myItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'offered');
-  const helpingScheduled = myItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'accepted');
-  const today = new Date().toISOString().split('T')[0];
+  const helpingPending = liveItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'offered');
+  const helpingScheduled = liveItems.filter(r => r.fulfilling_family_id === family?.id && r.status === 'accepted');
   // Multi-day (overnight) items aren't "past" until their end date, not
   // their start/drop-off date.
   const comingUp = Array.from(new Map(
@@ -216,7 +222,9 @@ export default function HomeScreen() {
                       key={r.id}
                       animalEmoji={getFamilyAnimal(r.requesting_family_id, r.requesting_family?.animal ?? null)}
                       title={r.title}
-                      subtitle={isHelping ? `You're helping ${relatedName ?? 'someone'}` : `${relatedName ?? 'Someone'} is helping you`}
+                      subtitle={proposalAwaitingMe(r, family?.id)
+                        ? `🕐 ${relatedName ?? 'They'} suggested a new time — tap to answer`
+                        : isHelping ? `You're helping ${relatedName ?? 'someone'}` : `${relatedName ?? 'Someone'} is helping you`}
                       meta={metaLine(r)}
                       amountText={`${isHelping ? '+' : '-'}${r.duration_hours}h`}
                       earning={isHelping}
@@ -255,7 +263,9 @@ export default function HomeScreen() {
                     key={r.id}
                     animalEmoji={getFamilyAnimal(r.fulfilling_family_id ?? r.requesting_family_id, r.fulfilling_family?.animal ?? null)}
                     title={r.title}
-                    subtitle={`${r.fulfilling_family?.name} offered to help`}
+                    subtitle={r.proposed_date
+                      ? (proposalAwaitingMe(r, family?.id) ? `🕐 ${r.fulfilling_family?.name} can help at a different time — tap to answer` : `🕐 Waiting on ${r.fulfilling_family?.name} to confirm your time`)
+                      : `${r.fulfilling_family?.name} offered to help`}
                     meta={metaLine(r)}
                     statusPill={<StatusBadge status={r.status} />}
                     amountText={`-${r.duration_hours}h`}
@@ -276,7 +286,9 @@ export default function HomeScreen() {
                     key={r.id}
                     animalEmoji={getFamilyAnimal(r.requesting_family_id, r.requesting_family?.animal ?? null)}
                     title={r.title}
-                    subtitle={`You offered to help ${r.requesting_family?.name}`}
+                    subtitle={proposalAwaitingMe(r, family?.id)
+                      ? `🕐 ${r.requesting_family?.name} asked for a different time — tap to answer`
+                      : `You offered to help ${r.requesting_family?.name}`}
                     meta={metaLine(r)}
                     statusPill={<StatusBadge status={r.status} />}
                     amountText={`+${r.duration_hours}h`}
@@ -286,6 +298,14 @@ export default function HomeScreen() {
                   />
                 ))}
               </>
+            )}
+            {expiredMine.length > 0 && (
+              <TouchableOpacity style={styles.expiredLine} onPress={() => router.push('/(tabs)/requests?filter=mine')}>
+                <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
+                <Text style={styles.expiredLineText}>
+                  {expiredMine.length} expired {expiredMine.length === 1 ? 'request' : 'requests'} — nobody confirmed, no hours moved. Repost or remove →
+                </Text>
+              </TouchableOpacity>
             )}
           </>
         )}
@@ -346,4 +366,6 @@ const styles = StyleSheet.create({
 
 
   sectionTitle: { fontSize: 17, fontWeight: '700', color: colors.text, marginBottom: 10, marginTop: 4 },
+  expiredLine: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.borderLight, borderRadius: 12, padding: 12, marginTop: 10 },
+  expiredLineText: { flex: 1, fontSize: 13, fontWeight: '600', color: colors.textSecondary },
 });

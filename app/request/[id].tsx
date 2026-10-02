@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { View, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Text } from '../../components/Text';
 import { Avatar } from '../../components/Avatar';
@@ -8,7 +8,11 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
 import { colors, buttonStyles } from '../../lib/theme';
-import { notifyFamily } from '../../lib/notifications';
+import { notifyFamily, notifyConnections } from '../../lib/notifications';
+import { formatPhone, todayString } from '../../lib/utils';
+import { isExpired, lastDay, proposalAwaitingMe, formatShortDate } from '../../lib/requestState';
+import { promptReachOut } from '../../lib/reachOut';
+import { ProposeTimeModal } from '../../components/ProposeTimeModal';
 import { addRequestToCalendar, scheduleReminders } from '../../lib/calendarReminders';
 import { StatusBadge } from '../../components/StatusBadge';
 import { DirectionTag } from '../../components/DirectionTag';
@@ -51,7 +55,7 @@ function categoryDetailText(category: RequestCategory, details: Request['categor
 }
 
 export default function RequestDetailScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, propose } = useLocalSearchParams<{ id: string; propose?: string }>();
   const { family, refreshFamily } = useAuth();
   const router = useRouter();
   const [reqState, setReqState] = useState<Request | null>(null);
@@ -59,6 +63,8 @@ export default function RequestDetailScreen() {
   const [busy, setBusy] = useState(false);
   const [reminderPickerVisible, setReminderPickerVisible] = useState(false);
   const [nudgeVisible, setNudgeVisible] = useState(false);
+  const [proposeVisible, setProposeVisible] = useState(false);
+  const [autoProposeDone, setAutoProposeDone] = useState(false);
 
   async function loadRequest() {
     if (!id) return;
@@ -72,6 +78,15 @@ export default function RequestDetailScreen() {
   }
 
   useFocusEffect(useCallback(() => { loadRequest(); }, [id]));
+
+  // Arriving from a list card's "Suggest a different time" opens the
+  // picker straight away, once.
+  useEffect(() => {
+    if (propose === '1' && reqState && !autoProposeDone) {
+      setAutoProposeDone(true);
+      setProposeVisible(true);
+    }
+  }, [propose, reqState, autoProposeDone]);
 
   if (loading) {
     return (
@@ -98,9 +113,20 @@ export default function RequestDetailScreen() {
 
   const isOwn = req.requesting_family_id === family?.id;
   const isFulfiller = req.fulfilling_family_id === family?.id;
-  // Multi-day (overnight) requests aren't past due until the actual end
-  // date passes, not the start/drop-off date.
-  const isPastDue = req.status !== 'completed' && (req.end_date ?? req.date) < new Date().toISOString().split('T')[0];
+  // Multi-day (overnight/flexible) requests aren't past until the actual
+  // end date passes, not the start/drop-off date. An open/offered one
+  // past its date is expired (nobody confirmed, no hours move); an
+  // accepted one past its date is just waiting on the settlement sweep.
+  const today = todayString();
+  const expired = isExpired(req, today);
+  const isPastDue = req.status === 'accepted' && !req.settled_at && lastDay(req) < today;
+  const hasProposal = !!req.proposed_date && !!req.proposed_start_time;
+  const proposalForMe = proposalAwaitingMe(req, family?.id);
+  const canPropose = !expired && !isPastDue && (
+    (req.status === 'open' && !isOwn)
+    || (req.status === 'offered' && (isOwn || isFulfiller))
+    || (req.status === 'accepted' && !req.settled_at && (isOwn || isFulfiller))
+  );
   const cat = CATEGORY_LABELS[req.category];
   const detailText = categoryDetailText(req.category, req.category_details);
   const isFlexible = !!(req.category_details as { timing_flexible?: boolean } | null)?.timing_flexible;
@@ -109,6 +135,10 @@ export default function RequestDetailScreen() {
   // or directly targeted; as anyone else, always the requester.
   const chatPartnerId = isOwn ? (req.fulfilling_family_id ?? req.target_household_id) : req.requesting_family_id;
   const chatPartnerName = isOwn ? (req.fulfilling_family?.name ?? req.target_household?.name) : req.requesting_family?.name;
+  const proposerName = req.proposed_by === family?.id
+    ? 'You'
+    : req.proposed_by === req.requesting_family_id ? (req.requesting_family?.name ?? 'They') : (req.fulfilling_family?.name ?? 'They');
+  const otherPartyName = isOwn ? req.fulfilling_family?.name : req.requesting_family?.name;
 
   async function withError(action: () => PromiseLike<{ error: { message: string } | null }>, then?: () => void | Promise<void>) {
     setBusy(true);
@@ -121,10 +151,16 @@ export default function RequestDetailScreen() {
 
   function offerRequest() {
     if (!family) return;
-    Alert.alert('Offer to help?', `If approved, you'll earn ${req.duration_hours}h.`, [
+    Alert.alert(
+      isFlexible ? 'When works for you?' : 'Offer to help?',
+      isFlexible
+        ? `Their timing is flexible (${req.start_time}). Offer as posted, or suggest a specific day and time. If approved, you'll earn ${req.duration_hours}h.`
+        : `If approved, you'll earn ${req.duration_hours}h. Can't make ${req.start_time}? Suggest a different time instead.`,
+      [
       { text: 'Not now', style: 'cancel' },
+      { text: 'Suggest a time', onPress: () => setProposeVisible(true) },
       {
-        text: 'Send offer', onPress: () => withError(
+        text: isFlexible ? 'Any time works' : 'Send offer', onPress: () => withError(
           () => supabase.rpc('offer_request', { p_request_id: req.id, p_offering_family_id: family.id }),
           () => notifyFamily(req.requesting_family_id, '🙋 Someone offered to help!', `${family.name} offered to help — open the app to approve or decline`, { path: `/(tabs)/requests?filter=mine` })
         ),
@@ -159,9 +195,115 @@ export default function RequestDetailScreen() {
   }
 
   function withdrawOffer() {
+    if (!family) return;
+    const requester = req.requesting_family;
     Alert.alert('Withdraw your offer?', 'The request goes back to available.', [
       { text: 'Keep it', style: 'cancel' },
-      { text: 'Withdraw', style: 'destructive', onPress: () => withError(() => supabase.rpc('retract_offer', { p_request_id: req.id })) },
+      {
+        text: 'Withdraw', style: 'destructive', onPress: () => withError(
+          () => supabase.rpc('retract_offer', { p_request_id: req.id }),
+          async () => {
+            await notifyFamily(req.requesting_family_id, '↩️ Offer withdrawn', `${family.name} withdrew their offer on "${req.title}" — it's back on the board`, { path: `/request/${req.id}` });
+            promptReachOut(router, requester, {
+              title: `Let ${requester?.name ?? 'them'} know?`,
+              message: "They've been notified, but a quick personal note goes a long way.",
+              prefill: `Hi! I'm sorry — I had to withdraw my offer for "${req.title}" on ${formatDate(req.date)}. `,
+            });
+          }
+        ),
+      },
+    ]);
+  }
+
+  async function submitProposal(date: string, time: string, note: string) {
+    if (!family) return;
+    const { error } = await supabase.rpc('propose_request_time', {
+      p_request_id: req.id, p_date: date, p_start_time: time, p_note: note || null,
+    });
+    if (error) { Alert.alert('Error', error.message); return; }
+    setProposeVisible(false);
+    const otherId = isOwn ? req.fulfilling_family_id : req.requesting_family_id;
+    const when = `${formatShortDate(date)} at ${time}`;
+    if (otherId) {
+      await notifyFamily(
+        otherId,
+        req.status === 'open' ? `🙋 ${family.name} can help — at a different time` : '🕐 New time suggested',
+        `${family.name} suggested ${when} for "${req.title}". Does that work?${note ? ` "${note}"` : ''}`,
+        { path: `/request/${req.id}` },
+      );
+    }
+    await loadRequest();
+  }
+
+  function respondToProposal(accept: boolean) {
+    if (!family || !req.proposed_date || !req.proposed_start_time) return;
+    const when = `${formatShortDate(req.proposed_date)} at ${req.proposed_start_time}`;
+    const willBook = req.status === 'offered';
+    const body = accept
+      ? willBook
+        ? `This books ${proposerName} for ${when}. ${isOwn ? `${req.duration_hours}h will be deducted from your balance once it happens.` : `You'll earn ${req.duration_hours}h once it happens.`}`
+        : `The booking moves to ${when}.`
+      : willBook
+        ? `${proposerName} said they can only do ${when} — passing puts the request back on the board.`
+        : 'The original time stays as it was.';
+    Alert.alert(accept ? `${when} works?` : "That time doesn't work?", body, [
+      { text: 'Back', style: 'cancel' },
+      {
+        text: accept ? 'Yes, confirm ✓' : "Doesn't work", style: accept ? 'default' : 'destructive', onPress: () => withError(
+          () => supabase.rpc('respond_to_time_proposal', { p_request_id: req.id, p_accept: accept }),
+          async () => {
+            if (req.proposed_by) {
+              await notifyFamily(
+                req.proposed_by,
+                accept ? '✅ New time confirmed' : "❌ That time didn't work",
+                accept
+                  ? `${family.name} confirmed ${when} for "${req.title}"`
+                  : `${family.name} can't do ${when} for "${req.title}"${willBook ? ' — the request is back on the board' : ' — the original time stands'}`,
+                { path: `/request/${req.id}` },
+              );
+            }
+            await refreshFamily();
+          }
+        ),
+      },
+    ]);
+  }
+
+  function openToVillage() {
+    if (!family) return;
+    Alert.alert(
+      'Open to your whole village?',
+      `Right now only ${req.target_household?.name ?? 'one household'} can see this. Opening it lets all your connections see it and offer to help.`,
+      [
+        { text: 'Keep private', style: 'cancel' },
+        {
+          text: 'Open it up', onPress: () => withError(
+            () => supabase.from('requests').update({ target_household_id: null }).eq('id', req.id),
+            () => notifyConnections(
+              family.id,
+              `${req.is_urgent ? '❗️ URGENT: ' : ''}${cat.emoji} New request in VillageMates`,
+              `${family.name} needs help: "${req.title}" on ${formatShortDate(req.date)}`,
+              { path: `/request/${req.id}` },
+              req.category,
+            ),
+          ),
+        },
+      ],
+    );
+  }
+
+  function removeExpired() {
+    Alert.alert('Remove this request?', "It'll be deleted for good. No hours were ever moved for it.", [
+      { text: 'Keep it', style: 'cancel' },
+      {
+        text: 'Remove', style: 'destructive', onPress: async () => {
+          setBusy(true);
+          const { error } = await supabase.from('requests').delete().eq('id', req.id);
+          setBusy(false);
+          if (error) return Alert.alert('Error', error.message);
+          router.back();
+        },
+      },
     ]);
   }
 
@@ -209,8 +351,18 @@ export default function RequestDetailScreen() {
           () => supabase.rpc('cancel_accepted_request', { p_request_id: req.id, p_family_id: family.id }),
           async () => {
             const other = isOwn ? req.fulfilling_family_id : req.requesting_family_id;
-            if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`, { path: `/(tabs)/requests?filter=${isOwn ? 'open' : 'mine'}` });
+            const otherFamily = isOwn ? req.fulfilling_family : req.requesting_family;
+            if (other) await notifyFamily(other, '⚠️ Cancelled', isOwn ? `${family.name} cancelled for ${formatDate(req.date)}` : `${family.name} backed out — post is available again`, { path: `/request/${req.id}` });
             await refreshFamily();
+            promptReachOut(router, otherFamily, {
+              title: `Reach out to ${otherFamily?.name ?? 'them'}?`,
+              message: within24h
+                ? "It's less than a day away — please contact them directly so they're not left without help."
+                : "They've been notified, but a personal message helps them re-plan.",
+              prefill: isOwn
+                ? `Hi! I'm sorry — I had to cancel "${req.title}" on ${formatDate(req.date)}. `
+                : `Hi! I'm so sorry — I have to back out of "${req.title}" on ${formatDate(req.date)}. `,
+            });
           }
         ),
       },
@@ -265,11 +417,14 @@ export default function RequestDetailScreen() {
         </View>
 
         <View style={styles.badgeRow}>
-          {isPastDue ? (
+          {expired ? (
+            <StatusBadge status="expired" />
+          ) : isPastDue ? (
             <View style={[styles.badge, { backgroundColor: colors.redLight }]}><Text style={[styles.badgeText, { color: colors.red }]}>⏰ Past date</Text></View>
           ) : (
             <StatusBadge status={req.status} />
           )}
+          {isOwn && req.target_household_id && !expired && req.status === 'open' && <ModifierBadge kind="private" />}
         </View>
 
         {/* Who */}
@@ -302,6 +457,46 @@ export default function RequestDetailScreen() {
           </Text>
         </View>
 
+        {expired && (
+          <View style={styles.expiredBox}>
+            <Text style={styles.expiredTitle}>⌛ This request expired</Text>
+            <Text style={styles.expiredText}>
+              {isOwn
+                ? 'Its date passed without a confirmed helper, so no hours moved. Repost it with a new date, or remove it.'
+                : 'Its date passed without a confirmed helper — no hours moved.'}
+            </Text>
+          </View>
+        )}
+
+        {/* Pending time suggestion */}
+        {hasProposal && !expired && (
+          <View style={[styles.proposalBox, proposalForMe && styles.proposalBoxAction]}>
+            <Text style={styles.proposalLabel}>
+              {req.proposed_by === family?.id ? 'You suggested a different time' : `${proposerName} suggested a different time`}
+            </Text>
+            <Text style={styles.proposalWhen}>📅 {formatDate(req.proposed_date!)} · {req.proposed_start_time}</Text>
+            <Text style={styles.proposalWas}>Originally: {formatShortDate(req.date)} · {req.start_time}</Text>
+            {req.proposed_note ? <Text style={styles.proposalNote}>"{req.proposed_note}"</Text> : null}
+            {proposalForMe ? (
+              <View style={styles.proposalActions}>
+                <TouchableOpacity style={buttonStyles.earn.container} onPress={() => respondToProposal(true)} disabled={busy}>
+                  <Text style={buttonStyles.earn.text}>Works for me ✓</Text>
+                </TouchableOpacity>
+                <View style={styles.proposalRow}>
+                  <TouchableOpacity style={[buttonStyles.secondary.container, { flex: 1 }]} onPress={() => setProposeVisible(true)} disabled={busy}>
+                    <Text style={buttonStyles.secondary.text}>Suggest another</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[buttonStyles.destructive.container, { flex: 1 }]} onPress={() => respondToProposal(false)} disabled={busy}>
+                    <Text style={buttonStyles.destructive.text}>Doesn't work</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              <Text style={styles.proposalWaiting}>⏳ Waiting for {otherPartyName ?? 'them'} to confirm</Text>
+            )}
+          </View>
+        )}
+
         {/* Notes */}
         {req.notes && (
           <View style={styles.section}>
@@ -329,7 +524,7 @@ export default function RequestDetailScreen() {
               </View>
               {contactFamily.parent1_name && <Text style={styles.contactLine}>👤 {contactFamily.parent1_name}</Text>}
               {contactFamily.parent1_phone && (
-                <Text style={styles.contactLine}>📞 {contactFamily.parent1_phone}</Text>
+                <Text style={styles.contactLine}>📞 {formatPhone(contactFamily.parent1_phone)}</Text>
               )}
               <Text style={styles.contactLine}>✉️ {contactFamily.email}</Text>
               {contactFamily.address && <Text style={styles.contactLine}>🏠 {contactFamily.address}</Text>}
@@ -383,15 +578,50 @@ export default function RequestDetailScreen() {
 
         <NudgeModal requestId={req.id} visible={nudgeVisible} onClose={() => setNudgeVisible(false)} />
 
+        <ProposeTimeModal
+          visible={proposeVisible}
+          onClose={() => setProposeVisible(false)}
+          onSubmit={submitProposal}
+          heading={req.status === 'accepted' ? 'Reschedule' : 'Suggest a different time'}
+          subheading={
+            req.status === 'open'
+              ? `This sends your offer to ${req.requesting_family?.name ?? 'them'} for the time you pick — they can confirm or pass.`
+              : `${otherPartyName ?? 'They'} will be asked to confirm. ${req.status === 'accepted' ? 'Until they do, the current time stands.' : ''}`
+          }
+          initialDate={req.proposed_date ?? req.date}
+          initialTime={req.proposed_start_time ?? req.start_time}
+          windowHint={isFlexible ? `${formatShortDate(req.date)}${req.end_date && req.end_date !== req.date ? ` – ${formatShortDate(req.end_date)}` : ''} · ${req.start_time}` : null}
+        />
+
         {/* Actions */}
         <View style={styles.actions}>
-          {req.status === 'open' && !isOwn && (
-            <TouchableOpacity style={buttonStyles.earn.container} onPress={offerRequest} disabled={busy}>
-              <Text style={buttonStyles.earn.text}>Offer to help — Earn {req.duration_hours}h</Text>
-            </TouchableOpacity>
-          )}
-          {req.status === 'open' && isOwn && (
+          {expired && isOwn && (
             <>
+              <TouchableOpacity style={buttonStyles.earn.container} onPress={() => router.push({ pathname: '/edit-request', params: { requestId: req.id } })}>
+                <Text style={buttonStyles.earn.text}>Repost with a new date</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={buttonStyles.destructive.container} onPress={removeExpired} disabled={busy}>
+                <Text style={buttonStyles.destructive.text}>Remove</Text>
+              </TouchableOpacity>
+            </>
+          )}
+          {!expired && req.status === 'open' && !isOwn && (
+            <>
+              <TouchableOpacity style={buttonStyles.earn.container} onPress={offerRequest} disabled={busy}>
+                <Text style={buttonStyles.earn.text}>Offer to help — Earn {req.duration_hours}h</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => setProposeVisible(true)} disabled={busy}>
+                <Text style={buttonStyles.secondary.text}>🕐 {isFlexible ? 'Pick a time that works for me' : 'Suggest a different time'}</Text>
+              </TouchableOpacity>
+            </>
+          )}
+          {!expired && req.status === 'open' && isOwn && (
+            <>
+              {req.target_household_id && (
+                <TouchableOpacity style={buttonStyles.earn.container} onPress={openToVillage} disabled={busy}>
+                  <Text style={buttonStyles.earn.text}>🏘 Open to entire village</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity style={buttonStyles.earn.container} onPress={() => setNudgeVisible(true)}>
                 <Text style={buttonStyles.earn.text}>👋 Nudge a connection</Text>
               </TouchableOpacity>
@@ -403,26 +633,46 @@ export default function RequestDetailScreen() {
               </TouchableOpacity>
             </>
           )}
-          {req.status === 'offered' && isOwn && (
+          {!expired && req.status === 'offered' && isOwn && !hasProposal && (
             <>
               <TouchableOpacity style={buttonStyles.spend.container} onPress={approveOffer} disabled={busy}>
                 <Text style={buttonStyles.spend.text}>Approve ✓</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => setProposeVisible(true)} disabled={busy}>
+                <Text style={buttonStyles.secondary.text}>🕐 Ask for a different time</Text>
               </TouchableOpacity>
               <TouchableOpacity style={buttonStyles.destructive.container} onPress={declineOffer} disabled={busy}>
                 <Text style={buttonStyles.destructive.text}>Decline offer</Text>
               </TouchableOpacity>
             </>
           )}
-          {req.status === 'offered' && isFulfiller && (
-            <TouchableOpacity style={buttonStyles.secondary.container} onPress={withdrawOffer} disabled={busy}>
-              <Text style={buttonStyles.secondary.text}>Withdraw my offer</Text>
+          {!expired && req.status === 'offered' && isOwn && hasProposal && !proposalForMe && (
+            <TouchableOpacity style={buttonStyles.destructive.container} onPress={declineOffer} disabled={busy}>
+              <Text style={buttonStyles.destructive.text}>Decline offer</Text>
             </TouchableOpacity>
+          )}
+          {!expired && req.status === 'offered' && isFulfiller && (
+            <>
+              {!hasProposal && (
+                <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => setProposeVisible(true)} disabled={busy}>
+                  <Text style={buttonStyles.secondary.text}>🕐 Change the time I offered</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity style={buttonStyles.secondary.container} onPress={withdrawOffer} disabled={busy}>
+                <Text style={buttonStyles.secondary.text}>Withdraw my offer</Text>
+              </TouchableOpacity>
+            </>
           )}
           {req.status === 'accepted' && !req.settled_at && (isOwn || isFulfiller) && (
             <>
               <TouchableOpacity style={buttonStyles.earn.container} onPress={markCompleted} disabled={busy}>
                 <Text style={buttonStyles.earn.text}>Mark as Completed ✓</Text>
               </TouchableOpacity>
+              {canPropose && !hasProposal && (
+                <TouchableOpacity style={buttonStyles.secondary.container} onPress={() => setProposeVisible(true)} disabled={busy}>
+                  <Text style={buttonStyles.secondary.text}>🕐 Reschedule</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity style={buttonStyles.destructive.container} onPress={cancelAcceptedRequest} disabled={busy}>
                 <Text style={buttonStyles.destructive.text}>{isOwn ? 'Cancel' : 'Back Out'}</Text>
               </TouchableOpacity>
@@ -479,6 +729,20 @@ const styles = StyleSheet.create({
   calendarRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
   calendarBtn: { flex: 1, backgroundColor: colors.card, borderRadius: 14, paddingVertical: 14, alignItems: 'center', borderWidth: 1.5, borderColor: colors.border },
   calendarBtnText: { color: colors.text, fontWeight: '700', fontSize: 14 },
+
+  expiredBox: { backgroundColor: colors.borderLight, borderRadius: 12, padding: 14, marginBottom: 18, gap: 4 },
+  expiredTitle: { fontSize: 15, fontWeight: '800', color: colors.text },
+  expiredText: { fontSize: 13, color: colors.textSecondary, lineHeight: 19 },
+
+  proposalBox: { backgroundColor: colors.amberLight, borderRadius: 14, padding: 14, marginBottom: 18, gap: 4, borderWidth: 1.5, borderColor: colors.amber + '60', borderStyle: 'dashed' },
+  proposalBoxAction: { borderStyle: 'solid', borderColor: colors.primary },
+  proposalLabel: { fontSize: 12, fontWeight: '700', color: colors.primaryDark, textTransform: 'uppercase', letterSpacing: 0.4 },
+  proposalWhen: { fontSize: 17, fontWeight: '800', color: colors.text },
+  proposalWas: { fontSize: 12, color: colors.textSecondary, textDecorationLine: 'line-through' },
+  proposalNote: { fontSize: 13, color: colors.text, fontStyle: 'italic', marginTop: 4 },
+  proposalWaiting: { fontSize: 13, color: colors.textSecondary, fontWeight: '600', marginTop: 6 },
+  proposalActions: { gap: 8, marginTop: 10 },
+  proposalRow: { flexDirection: 'row', gap: 8 },
 
   actions: { gap: 10 },
 });
